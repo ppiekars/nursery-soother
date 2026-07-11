@@ -5,10 +5,10 @@ coordinate an existing cry-detection sensor, camera, and media player into a
 conservative nursery response workflow.
 
 > [!IMPORTANT]
-> This repository currently contains an **inert foundation release**. It can be
-> installed and added to Home Assistant to verify the HACS and config-entry
-> plumbing, but it creates no entities, registers no actions, listens to no
-> sensors, and never controls a speaker or sends a notification.
+> This repository currently contains an **inert configuration release**. It can
+> store selections for a cry-detection sensor, camera, and media player, but it
+> creates no entities, registers no actions, listens to no sensors, and never
+> controls a speaker or sends a notification.
 
 Nursery Soother is not a medical device, baby monitor, or substitute for direct
 adult supervision. Future automation must always be treated as an aid, never as
@@ -16,10 +16,12 @@ a safety system.
 
 ## Current scope
 
-The foundation includes:
+The current configuration slice includes:
 
 - the HACS-compatible `custom_components/nursery_soother` layout;
-- a Home Assistant manifest and translated placeholder config flow;
+- a translated config flow with domain-filtered selectors for one cry-detection
+  binary sensor, camera, and media player;
+- config-entry storage and setup-time domain validation for those selections;
 - unload-safe config-entry lifecycle hooks;
 - HACS and Hassfest validation workflows;
 - pre-commit file, Ruff, and lockfile checks plus pre-push tests;
@@ -43,7 +45,8 @@ repository:
 6. Restart Home Assistant.
 7. Go to **Settings > Devices & services**, choose **Add integration**, and
    search for **Nursery Soother**.
-8. Submit the placeholder setup form.
+8. Select the cry-detection sensor, camera, and media player, then submit the
+   setup form.
 
 The expected result is one loaded config entry and no devices, entities, or
 actions. That confirms the install path without affecting the nursery.
@@ -69,8 +72,7 @@ The resulting path must be:
 
 ## Development
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for the local checks and contribution
-workflow. See [docs/releasing.md](docs/releasing.md) before publishing a release.
+See [docs/releasing.md](docs/releasing.md) before publishing a release.
 
 ## License
 

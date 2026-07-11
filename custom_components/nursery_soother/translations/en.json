@@ -4,11 +4,28 @@
     "step": {
       "user": {
         "title": "Set up Nursery Soother",
-        "description": "This foundation release only verifies that the integration can be installed and loaded. It will not monitor or control anything."
+        "description": "Select the nursery entities to prepare Nursery Soother. This version will not monitor or control them.",
+        "data": {
+          "cry_sensor": "Cry-detection sensor",
+          "camera": "Camera",
+          "media_player": "Media player"
+        }
       }
     },
     "abort": {
       "single_instance_allowed": "Nursery Soother is already configured."
+    },
+    "error": {
+      "invalid_entity": "The selected entity could not be found.",
+      "invalid_entity_domain": "The selected entity has the wrong type."
+    }
+  },
+  "exceptions": {
+    "invalid_entity": {
+      "message": "The configured {config_key} must be a valid entity ID."
+    },
+    "invalid_entity_domain": {
+      "message": "The configured {config_key} must be a {expected_domain} entity."
     }
   }
 }

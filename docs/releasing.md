@@ -13,7 +13,7 @@ Before the first push intended for HACS testing:
 - add topics such as `home-assistant`, `hacs`, `custom-integration`, and
   `nursery`;
 - keep GitHub Issues enabled;
-- run the local checks in [CONTRIBUTING.md](../CONTRIBUTING.md).
+- run the pre-commit checks and test suite.
 
 The HACS workflow temporarily ignores `brands`, `description`, and `topics` so
 the code scaffold can be validated before remote metadata and artwork exist.
