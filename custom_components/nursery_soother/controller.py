@@ -135,6 +135,7 @@ class NurserySootherController:
         self._incident_active = self._episode_confirmed = self._provisional_level_1 = (
             False
         )
+        self._initial_level_1_applied = self._settling_deferred_by_lock = False
         self._episode_started_at: datetime | None = None
         self._confirmed_at: datetime | None = None
         self._last_cry_activity_at: datetime | None = None
@@ -179,6 +180,11 @@ class NurserySootherController:
     def automatic(self) -> bool:
         """Return whether confirmed crying may increase the level."""
         return self.settings.automatic_operation
+
+    @property
+    def locked(self) -> bool:
+        """Return whether policy-driven level changes are frozen."""
+        return self.settings.level_lock
 
     @property
     def suggested_level(self) -> SoothingLevel | None:
@@ -227,6 +233,7 @@ class NurserySootherController:
             "recommendation": self.recommendation,
             "level": self.level,
             "automatic_operation": self.automatic,
+            "level_locked": self.locked,
             "enabled": self.enabled,
             "configured": self.configured,
             "dependencies_available": self.dependencies_available,
@@ -234,6 +241,7 @@ class NurserySootherController:
             "cry_episode_active": self._incident_active,
             "cry_episode_confirmed": self._episode_confirmed,
             "provisional_level_1": self._provisional_level_1,
+            "initial_level_1_applied": self._initial_level_1_applied,
             "stage_evidence": {
                 "events": evidence.events,
                 "active_seconds": round(evidence.active_seconds, 3),
@@ -532,6 +540,54 @@ class NurserySootherController:
             else:
                 self._emit_update()
 
+    async def async_set_locked(self, *, locked: bool) -> None:
+        """Freeze or resume policy-driven level changes."""
+        async with self._lock:
+            self._ensure_started()
+            requested = bool(locked)
+            if requested is self.locked:
+                return
+            self.settings.level_lock = requested
+            self._persist_settings()
+            now = dt_util.utcnow()
+            if requested:
+                if self._cancel_settling is not None:
+                    self._settling_deferred_by_lock = True
+                self._cancel_timer("settling")
+                self._cancel_timer("provisional")
+                self._provisional_level_1 = False
+                self._emit_update()
+                return
+            if self._incident_active:
+                await self._async_evaluate_cry_evidence(now)
+                if (
+                    self._initial_level_1_applied
+                    and not self._episode_confirmed
+                    and self.level is SoothingLevel.LEVEL_1
+                ):
+                    response_seconds = max(
+                        float(self.settings.level_up_seconds),
+                        self.settings.debounce_seconds + 0.001,
+                    )
+                    elapsed = (
+                        (now - self._last_level_change_at).total_seconds()
+                        if self._last_level_change_at is not None
+                        else response_seconds
+                    )
+                    remaining = response_seconds - elapsed
+                    if remaining <= 0:
+                        await self._async_rollback_provisional_level_1(
+                            "level lock released after unconfirmed cry event"
+                        )
+                    else:
+                        self._provisional_level_1 = True
+                        self._schedule_provisional_rollback(remaining)
+                return
+            if self._settling_deferred_by_lock and self.enabled:
+                self._settling_deferred_by_lock = False
+                self._schedule_settling()
+            self._emit_update()
+
     async def async_set_volume(self, key: str, value: float) -> None:
         """Persist one volume setting after validating all relationships."""
         async with self._lock:
@@ -803,7 +859,8 @@ class NurserySootherController:
         """Extend the event episode and restart its quiet clocks."""
         self._last_cry_activity_at = now
         self._schedule_cry_gap()
-        self._schedule_settling()
+        if not self.locked:
+            self._schedule_settling()
 
     async def _async_evaluate_cry_evidence(self, now: datetime) -> None:
         """Confirm or advance an episode once evidence and timing both allow it."""
@@ -819,6 +876,7 @@ class NurserySootherController:
             not self._episode_confirmed
             and not self._provisional_level_1
             and self.automatic
+            and not self.locked
             and self.level is SoothingLevel.BASELINE
             and (snapshot.events > 0 or self._physical_cry_is_on())
             and not await self._async_start_provisional_level_1(now)
@@ -881,9 +939,13 @@ class NurserySootherController:
     ) -> None:
         """Raise one level automatically or send one exact manual suggestion."""
         provisional_started_at = (
-            self._last_level_change_at if self._provisional_level_1 else None
+            self._last_level_change_at if self._initial_level_1_applied else None
         )
-        if self.automatic and self._provisional_level_1:
+        if (
+            self.automatic
+            and self._initial_level_1_applied
+            and self.level is SoothingLevel.LEVEL_1
+        ):
             self._cancel_provisional_response()
             self._transition(
                 SootherState.RESPONDING,
@@ -904,7 +966,7 @@ class NurserySootherController:
             return
 
         next_level = self.level.next_active()
-        if self.automatic and next_level is not None:
+        if self.automatic and not self.locked and next_level is not None:
             previous_level = self.level
             previous_media = self._media_for_level(previous_level)
             self.settings.level = next_level
@@ -954,6 +1016,7 @@ class NurserySootherController:
             return False
         self._persist_settings()
         self._provisional_level_1 = True
+        self._initial_level_1_applied = True
         self._last_level_change_at = now
         self._transition(
             SootherState.CRY_PENDING,
@@ -963,7 +1026,7 @@ class NurserySootherController:
         self._schedule_provisional_rollback()
         return True
 
-    def _schedule_provisional_rollback(self) -> None:
+    def _schedule_provisional_rollback(self, delay: float | None = None) -> None:
         """Return an unconfirmed provisional response to Baseline after dwell."""
         self._cancel_timer("provisional")
         episode = self._episode
@@ -990,7 +1053,9 @@ class NurserySootherController:
             max(
                 float(self.settings.level_up_seconds),
                 self.settings.debounce_seconds + 0.001,
-            ),
+            )
+            if delay is None
+            else delay,
             _expired,
         )
         self._cancel_provisional = cancel_callback
@@ -1013,6 +1078,7 @@ class NurserySootherController:
         """Clear provisional policy state without changing the selected level."""
         self._cancel_timer("provisional")
         self._provisional_level_1 = False
+        self._initial_level_1_applied = False
 
     async def _async_fail_safe_notification_delivery(self) -> None:
         """Stop owned output when no caregiver notification can be delivered."""
@@ -1099,7 +1165,8 @@ class NurserySootherController:
                 if self._physical_cry_is_on():
                     self._last_cry_activity_at = now
                     self._schedule_cry_gap()
-                    self._schedule_settling()
+                    if not self.locked:
+                        self._schedule_settling()
                     return
                 await self._async_finish_cry_gap(now, activity_at)
 
@@ -1126,6 +1193,7 @@ class NurserySootherController:
         self._episode += 1
         self._evidence.reset(now)
         self._stage_simulated_events = 0
+        self._initial_level_1_applied = False
         self._transition(
             SootherState.SETTLING,
             Recommendation.SETTLING,
@@ -1134,6 +1202,10 @@ class NurserySootherController:
         elapsed_quiet = (
             (now - activity_at).total_seconds() if activity_at is not None else 0.0
         )
+        if self.locked:
+            self._settling_deferred_by_lock = True
+            await self._async_clear_notifications()
+            return
         self._schedule_settling(
             max(0.001, self.settings.settling_seconds - elapsed_quiet)
         )
@@ -1142,6 +1214,9 @@ class NurserySootherController:
     def _schedule_settling(self, delay: float | None = None) -> None:
         """Step down exactly one level after uninterrupted quiet."""
         self._cancel_timer("settling")
+        if self.locked:
+            self._settling_deferred_by_lock = True
+            return
         episode = self._episode
         cancel_callback: CALLBACK_TYPE | None = None
 
@@ -1155,6 +1230,7 @@ class NurserySootherController:
                     episode != self._episode
                     or not self._started
                     or not self.enabled
+                    or self.locked
                     or not self.dependencies_available
                     or self._incident_active
                     or self._physical_cry_is_on()
@@ -2171,7 +2247,9 @@ class NurserySootherController:
         self._confirmed_at = None
         self._last_cry_activity_at = None
         self._last_level_change_at = None
+        self._settling_deferred_by_lock = False
         self._provisional_level_1 = False
+        self._initial_level_1_applied = False
         self._stage_simulated_events = 0
         self._evidence.reset(dt_util.utcnow())
 
@@ -2180,6 +2258,7 @@ class NurserySootherController:
         self._cancel_timer("evidence")
         self._cancel_timer("provisional")
         self._provisional_level_1 = False
+        self._initial_level_1_applied = False
         self._cancel_timer("cry_gap")
         self._cancel_timer("settling")
         self._cancel_timer("attention")

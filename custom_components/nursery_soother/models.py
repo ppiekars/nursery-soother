@@ -18,6 +18,7 @@ from .const import (
     CONF_LEVEL_2_VOLUME,
     CONF_LEVEL_3_VOLUME,
     CONF_LEVEL_4_VOLUME,
+    CONF_LEVEL_LOCK,
     CONF_LEVEL_UP_SECONDS,
     CONF_MAX_VOLUME,
     CONF_SETTLING_SECONDS,
@@ -99,6 +100,7 @@ class SootherSettings:
 
     level: SoothingLevel
     automatic_operation: bool
+    level_lock: bool
     baseline_volume: float
     level_1_volume: float
     level_2_volume: float
@@ -120,6 +122,7 @@ class SootherSettings:
         return cls(
             level=SoothingLevel(values[CONF_LEVEL]),
             automatic_operation=bool(values[CONF_AUTOMATIC_OPERATION]),
+            level_lock=bool(values[CONF_LEVEL_LOCK]),
             baseline_volume=float(values[CONF_BASELINE_VOLUME]),
             level_1_volume=float(values[CONF_LEVEL_1_VOLUME]),
             level_2_volume=float(values[CONF_LEVEL_2_VOLUME]),
@@ -139,6 +142,7 @@ class SootherSettings:
         return {
             CONF_LEVEL: self.level.value,
             CONF_AUTOMATIC_OPERATION: self.automatic_operation,
+            CONF_LEVEL_LOCK: self.level_lock,
             CONF_BASELINE_VOLUME: self.baseline_volume,
             CONF_LEVEL_1_VOLUME: self.level_1_volume,
             CONF_LEVEL_2_VOLUME: self.level_2_volume,

@@ -20,6 +20,7 @@ from .const import (
     CONF_LEVEL_2_VOLUME,
     CONF_LEVEL_3_VOLUME,
     CONF_LEVEL_4_VOLUME,
+    CONF_LEVEL_LOCK,
     CONF_LEVEL_UP_SECONDS,
     CONF_MAX_VOLUME,
     CONF_NOTIFY_TARGETS,
@@ -118,7 +119,7 @@ def _functional_data_is_valid(entry: ConfigEntry[Any]) -> bool:
 
 
 def _validate_entry_data(hass: HomeAssistant, entry: ConfigEntry[Any]) -> None:
-    """Validate persisted v5 data independently of the config flow."""
+    """Validate persisted v6 data independently of the config flow."""
     for config_key, expected_domain in ENTITY_DOMAINS.items():
         entity_id = entry.data.get(config_key)
         if not isinstance(entity_id, str) or not valid_entity_id(entity_id):
@@ -153,6 +154,7 @@ def _validate_entry_data(hass: HomeAssistant, entry: ConfigEntry[Any]) -> None:
         not isinstance(raw_options[CONF_LEVEL], str)
         or not isinstance(settings.level, SoothingLevel)
         or not isinstance(raw_options[CONF_AUTOMATIC_OPERATION], bool)
+        or not isinstance(raw_options[CONF_LEVEL_LOCK], bool)
         or any(
             isinstance(value, bool) or not isinstance(value, int | float)
             for value in (raw_options[key] for key in _VOLUME_KEYS)
@@ -176,23 +178,25 @@ def _validate_entry_data(hass: HomeAssistant, entry: ConfigEntry[Any]) -> None:
 
 
 async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry[Any]) -> bool:
-    """Move v4 default timings to the responsive v5 policy."""
+    """Migrate legacy timings and add the v6 level-lock default."""
     if entry.version == ENTRY_VERSION:
         return True
-    if entry.version != _LEGACY_ENTRY_VERSION:
+    if entry.version not in {_LEGACY_ENTRY_VERSION, 5}:
         return False
 
     options = dict(entry.options)
-    if (
-        options.get(CONF_DEBOUNCE_SECONDS, _LEGACY_DEFAULT_DEBOUNCE_SECONDS)
-        == _LEGACY_DEFAULT_DEBOUNCE_SECONDS
-    ):
-        options[CONF_DEBOUNCE_SECONDS] = DEFAULT_OPTIONS[CONF_DEBOUNCE_SECONDS]
-    if (
-        options.get(CONF_LEVEL_UP_SECONDS, _LEGACY_DEFAULT_LEVEL_UP_SECONDS)
-        == _LEGACY_DEFAULT_LEVEL_UP_SECONDS
-    ):
-        options[CONF_LEVEL_UP_SECONDS] = DEFAULT_OPTIONS[CONF_LEVEL_UP_SECONDS]
+    if entry.version == _LEGACY_ENTRY_VERSION:
+        if (
+            options.get(CONF_DEBOUNCE_SECONDS, _LEGACY_DEFAULT_DEBOUNCE_SECONDS)
+            == _LEGACY_DEFAULT_DEBOUNCE_SECONDS
+        ):
+            options[CONF_DEBOUNCE_SECONDS] = DEFAULT_OPTIONS[CONF_DEBOUNCE_SECONDS]
+        if (
+            options.get(CONF_LEVEL_UP_SECONDS, _LEGACY_DEFAULT_LEVEL_UP_SECONDS)
+            == _LEGACY_DEFAULT_LEVEL_UP_SECONDS
+        ):
+            options[CONF_LEVEL_UP_SECONDS] = DEFAULT_OPTIONS[CONF_LEVEL_UP_SECONDS]
+    options.setdefault(CONF_LEVEL_LOCK, DEFAULT_OPTIONS[CONF_LEVEL_LOCK])
 
     hass.config_entries.async_update_entry(
         entry,

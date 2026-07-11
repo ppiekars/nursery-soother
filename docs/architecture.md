@@ -11,8 +11,8 @@ One config entry consumes:
 - one `binary_sensor` whose off-to-on transition means a cry was detected;
 - one `camera` for caregiver-facing context;
 - one `media_player` for soothing playback and volume control;
-- one audio item selected through the Media browser from Home Assistant's Local
-  media source, which Nursery Soother requires;
+- one audio mapping for each active level, selected through the Media browser
+  from Home Assistant's Local media source;
 - one or more `notify.mobile_app_*` actions for caregiver communication.
 
 The implementation remains device-agnostic. Standard Home Assistant entity
@@ -108,7 +108,7 @@ custom_components/nursery_soother/
 ├── controller.py        # evidence policy, timers, and guarded side effects
 ├── entity.py            # shared controller-backed entity behavior
 ├── select.py            # exact Standby/Baseline/Level 1–4 control
-├── switch.py            # Automatic operation control
+├── switch.py            # Automatic operation and Level lock controls
 ├── sensor.py            # policy-state and recommendation sensors
 ├── binary_sensor.py     # attention-required indicator
 ├── number.py            # five level volumes and Maximum
@@ -156,18 +156,19 @@ Config-entry `data` contains stable construction dependencies:
 - cry sensor entity ID;
 - camera entity ID;
 - media-player entity ID;
-- configured soothing media content ID and type;
+- configured soothing media content ID and type for every active level;
 - configured mobile notification action names.
 
-The sound representation is level-ready even though the first release selects
-one item. Runtime construction creates a map for Baseline and Levels 1–4, with
-all five entries pointing to the chosen item. A later configuration flow may
-store different media per level without changing policy transitions.
+The configuration flow stores a complete map for Baseline and Levels 1–4.
+Each entry may point to a distinct local-media item, while selecting the same
+item more than once remains valid. Policy transitions resolve only the target
+level's mapping.
 
 Config-entry `options` contains caregiver-adjustable policy values:
 
 - exact selected level;
 - Automatic operation choice;
+- Level lock choice;
 - Baseline and Level 1–4 volume percentages;
 - Maximum volume percentage;
 - confirmation debounce;
@@ -340,6 +341,18 @@ walking through several levels. A manual exact-level selection also establishes
 a new boundary, so earlier evidence cannot immediately override the parent.
 Level 4 has no automatic successor.
 
+### Level lock
+
+Level lock freezes policy-driven output changes at the current exact level.
+While locked, cry evidence can still confirm, reset stages, start the attention
+deadline, and notify caregivers, but it cannot provisionally or automatically
+increase the level. Quiet expiry is remembered without applying a downshift;
+unlocking starts a fresh quiet interval before that deferred decrease.
+
+Exact parent selections, including Standby, remain available while locked and
+become the new held level. The lock does not override dependency fail-safe,
+playback takeover handling, Maximum volume, or the fixed attention deadline.
+
 ### Quiet downshift
 
 When no new cry evidence is present, the controller enters Settling. In both
@@ -481,7 +494,7 @@ of polling.
 | Platform | Entities | Behavior |
 | --- | --- | --- |
 | `select` | Level | Exact Standby, Baseline, or Level 1–4 command |
-| `switch` | Automatic operation | Authorize or prevent upward policy changes |
+| `switch` | Automatic operation, Level lock | Choose automatic response and freeze policy-driven level changes |
 | `sensor` | State, Recommendation | Read-only policy values and safe explanatory attributes |
 | `binary_sensor` | Attention required | True only when direct caregiver attention is requested |
 | `number` | Baseline, Level 1, Level 2, Level 3, Level 4, Maximum volume | Persist validated percentages and apply safe live updates |
@@ -492,6 +505,7 @@ Expected default entity IDs are samples, not internal identity:
 ```text
 select.nursery_soother_level
 switch.nursery_soother_automatic_operation
+switch.nursery_soother_level_lock
 sensor.nursery_soother_state
 sensor.nursery_soother_recommendation
 binary_sensor.nursery_soother_attention_required

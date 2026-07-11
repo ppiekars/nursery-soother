@@ -10,7 +10,8 @@ through **Level 4**. A parent can always select a level directly. An optional
 reversible Baseline-to-Level-1 response, then allows confirmed, continuing cry
 events to move up one level at a time. With automatic operation off, the
 integration explains confirmed evidence and suggests the exact next level
-instead.
+instead. A separate **Level lock** switch freezes policy-driven increases and
+quiet downshifts at the selected level while preserving direct parent control.
 
 > [!IMPORTANT]
 > Nursery Soother is not a medical device, baby monitor, or substitute for
@@ -39,16 +40,17 @@ Enter Standby, stop owned playback, and request caregiver attention
 
 The following rules are deliberate:
 
-- New entries start at **Standby** with **Automatic operation off**. Installing,
-  reconfiguring, or reloading a standby entry cannot start playback.
+- New entries start at **Standby** with **Automatic operation** and **Level
+  lock** off. Installing, reconfiguring, or reloading a standby entry cannot
+  start playback.
 - Standby is truly off: physical cry events are ignored, **Simulate cry event**
   is a no-op, and Automatic operation can never leave Standby. A parent must
   first select Baseline or another active level to start a soothing session.
 - Selecting any active level is an explicit command. The integration sets that
   level's exact volume and starts or changes to its mapped soothing sound.
-- The current release maps the same configured MP3 to Baseline and Levels 1–4.
-  The controller uses a per-level sound map so distinct sounds can be added
-  without changing the level policy.
+- Baseline and Levels 1–4 each have a configured Local Media sound. They may
+  reuse one audio item or select different tracks. A level change restarts
+  playback only when its mapped sound differs.
 - Reolink exposes cry detections as brief binary-sensor pulses. Nursery Soother
   counts rising edges and active time inside a rolling evidence window; it does
   not require the sensor to remain continuously on.
@@ -65,6 +67,9 @@ The following rules are deliberate:
   exact next-level suggestion. It never changes the level by itself.
 - Quiet downshifts are conservative in both modes: each uninterrupted quiet
   interval moves down one level, stopping at Baseline rather than Standby.
+- Level lock freezes automatic increases and quiet downshifts. Parents can
+  still select any exact level or Standby while it is on. Dependency failures,
+  playback takeover, and the fixed attention cutoff remain safety overrides.
 - An unresolved confirmed episode has one fixed attention deadline. At expiry,
   the integration enters Standby, stops only its own playback, and asks a
   caregiver to attend. It never plays indefinitely at a high level.
@@ -110,9 +115,8 @@ Before setup, make these available in Home Assistant:
 - a `camera` for parent-facing notification and dashboard context;
 - a `media_player` that supports setting volume, playing the selected media,
   and stopping or pausing playback;
-- an audio item selected through the Media browser from Home Assistant's
-  [Local media source](https://www.home-assistant.io/integrations/media_source/#local-media),
-  which Nursery Soother requires;
+- local audio selected for each active level through Home Assistant's
+  [Local media source](https://www.home-assistant.io/integrations/media_source/#local-media);
 - one or more Home Assistant Companion app notification actions named
   `notify.mobile_app_*`.
 
@@ -150,7 +154,8 @@ The setup flow asks for the stable dependencies of one nursery:
 1. cry-detection binary sensor;
 2. nursery camera;
 3. media player;
-4. soothing audio from **Local media** in the Media browser;
+4. a **Local media** sound for Baseline and each of Levels 1–4 (the same item
+   may be selected more than once);
 5. one or more Companion app notification targets.
 
 After setup, the level remains Standby and automatic operation remains off.
@@ -186,7 +191,7 @@ Volume settings must satisfy:
 
 The controller applies the hard maximum again at the media-player boundary.
 Use the config entry's **Configure** action to change volumes and timing. Use
-**Reconfigure** to replace the cry sensor, camera, speaker, media source, or
+**Reconfigure** to replace the cry sensor, camera, speaker, per-level media, or
 notification targets. Reconfiguration preserves parent intent but never
 changes a Standby entry into an active level.
 
@@ -194,8 +199,9 @@ During v4 migration, stored timings exactly equal to the former defaults—10
 seconds for debounce and 30 seconds for level dwell—are interpreted as legacy
 defaults and changed to 8 and 20 seconds. This also applies if those exact
 values were deliberately selected, because stored intent is indistinguishable.
-Other timing values are preserved. The fixed 2/8 initial and 1/6 continuing
-evidence thresholds apply to every v5 entry.
+Other timing values are preserved. v5 entries receive Level lock off during
+the v6 migration. The fixed 2/8 initial and 1/6 continuing evidence thresholds
+apply to every current entry.
 
 ## Entities and standard actions
 
@@ -207,6 +213,7 @@ than depend on a copied sample ID.
 | --- | --- | --- |
 | `select` | Exact output: Standby, Baseline, or Level 1–4 | `select.select_option` |
 | `switch` | Allow or prevent automatic upward level changes | `switch.turn_on`, `switch.turn_off` |
+| `switch` | Freeze policy-driven changes at the current level | `switch.turn_on`, `switch.turn_off` |
 | `sensor` | Current policy phase | Read-only |
 | `sensor` | Current recommendation and exact suggested next level | Read-only |
 | `binary_sensor` | Whether caregiver attention is required | Read-only |
@@ -256,6 +263,13 @@ the previous response is never reused. Automatic operation cannot skip a
 level, exceed Level 4, bypass Maximum, leave Standby, or override a dependency
 or playback-ownership fault. A parent must select an active level before cry
 response monitoring begins.
+
+With **Level lock on**, evidence and caregiver notifications continue, but the
+policy cannot increase or quietly decrease the level. A parent may still select
+another exact level or Standby. Unlocking resumes normal policy timing; a quiet
+downshift deferred by the lock receives a fresh quiet interval. The fixed
+attention deadline, dependency fail-safe, and playback-ownership protections
+can still enter Standby or lower output as required.
 
 In both modes, each 120-second uninterrupted quiet interval moves down one
 level until Baseline. If the episode remains unresolved for 150 seconds from
@@ -315,12 +329,10 @@ or notification contents.
 
 ## Limitations and deferred features
 
-The current level model intentionally starts with one audio item mapped to all
-active levels. Per-level sound selection is the next natural extension; the
-controller's level-to-sound model is already separate from level-to-volume
-policy. This release also does not include schedules, multiple cry inputs,
-long-term event analytics, a custom frontend card, or device-specific Reolink,
-Sonos, or Frigate behavior.
+The level-to-sound model is separate from level-to-volume policy, and every
+active level has its own Local Media selection. This release does not include
+schedules, multiple cry inputs, long-term event analytics, a custom frontend
+card, or device-specific Reolink, Sonos, or Frigate behavior.
 
 The controller requests playback again when its owned player reports idle,
 off, or paused. Continuous behavior still depends on the selected player and

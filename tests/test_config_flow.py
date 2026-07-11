@@ -24,6 +24,7 @@ from custom_components.nursery_soother.config_flow import (
 from custom_components.nursery_soother.const import (
     CONF_ATTENTION_SECONDS,
     CONF_AUTOMATIC_OPERATION,
+    CONF_BASELINE_SOUND,
     CONF_BASELINE_VOLUME,
     CONF_CAMERA,
     CONF_CRY_GAP_SECONDS,
@@ -31,16 +32,20 @@ from custom_components.nursery_soother.const import (
     CONF_DEBOUNCE_SECONDS,
     CONF_EVIDENCE_WINDOW_SECONDS,
     CONF_LEVEL,
+    CONF_LEVEL_1_SOUND,
     CONF_LEVEL_1_VOLUME,
+    CONF_LEVEL_2_SOUND,
     CONF_LEVEL_2_VOLUME,
+    CONF_LEVEL_3_SOUND,
     CONF_LEVEL_3_VOLUME,
+    CONF_LEVEL_4_SOUND,
     CONF_LEVEL_4_VOLUME,
+    CONF_LEVEL_LOCK,
     CONF_LEVEL_UP_SECONDS,
     CONF_MAX_VOLUME,
     CONF_MEDIA_PLAYER,
     CONF_NOTIFY_TARGETS,
     CONF_SETTLING_SECONDS,
-    CONF_SOOTHING_SOUND,
     CONF_SOUNDS,
     DEFAULT_ATTENTION_SECONDS,
     DEFAULT_AUTOMATIC_OPERATION,
@@ -53,6 +58,7 @@ from custom_components.nursery_soother.const import (
     DEFAULT_LEVEL_2_VOLUME,
     DEFAULT_LEVEL_3_VOLUME,
     DEFAULT_LEVEL_4_VOLUME,
+    DEFAULT_LEVEL_LOCK,
     DEFAULT_LEVEL_UP_SECONDS,
     DEFAULT_MAX_VOLUME,
     DEFAULT_SETTLING_SECONDS,
@@ -65,23 +71,36 @@ from custom_components.nursery_soother.models import ACTIVE_LEVELS, SoothingLeve
 if TYPE_CHECKING:
     from homeassistant.core import HomeAssistant
 
-SOOTHING_SOUND = {
-    "media_content_id": "media-source://media_source/local/white-noise.mp3",
-    "media_content_type": "audio/mpeg",
+LEVEL_SOUND_KEYS = {
+    SoothingLevel.BASELINE: CONF_BASELINE_SOUND,
+    SoothingLevel.LEVEL_1: CONF_LEVEL_1_SOUND,
+    SoothingLevel.LEVEL_2: CONF_LEVEL_2_SOUND,
+    SoothingLevel.LEVEL_3: CONF_LEVEL_3_SOUND,
+    SoothingLevel.LEVEL_4: CONF_LEVEL_4_SOUND,
 }
-SOUNDS = {level.value: dict(SOOTHING_SOUND) for level in ACTIVE_LEVELS}
+SOUND_SELECTIONS = {
+    config_key: {
+        "media_content_id": f"media-source://media_source/local/{level.value}.mp3",
+        "media_content_type": "audio/mpeg",
+    }
+    for level, config_key in LEVEL_SOUND_KEYS.items()
+}
+SOUNDS = {
+    level.value: dict(SOUND_SELECTIONS[config_key])
+    for level, config_key in LEVEL_SOUND_KEYS.items()
+}
 USER_DATA = {
     CONF_CRY_SENSOR: "binary_sensor.nursery_crying",
     CONF_CAMERA: "camera.nursery",
     CONF_MEDIA_PLAYER: "media_player.nursery",
-    CONF_SOOTHING_SOUND: SOOTHING_SOUND,
+    **SOUND_SELECTIONS,
     CONF_NOTIFY_TARGETS: [
         "notify.mobile_app_parent_one",
         "notify.mobile_app_parent_two",
     ],
 }
 CONFIG_DATA = {
-    key: value for key, value in USER_DATA.items() if key != CONF_SOOTHING_SOUND
+    key: value for key, value in USER_DATA.items() if key not in SOUND_SELECTIONS
 } | {CONF_SOUNDS: SOUNDS}
 BEHAVIOR_DATA = {
     CONF_BASELINE_VOLUME: DEFAULT_BASELINE_VOLUME,
@@ -100,6 +119,7 @@ BEHAVIOR_DATA = {
 ENTRY_OPTIONS = BEHAVIOR_DATA | {
     CONF_LEVEL: DEFAULT_LEVEL,
     CONF_AUTOMATIC_OPERATION: DEFAULT_AUTOMATIC_OPERATION,
+    CONF_LEVEL_LOCK: DEFAULT_LEVEL_LOCK,
 }
 MEDIA_PLAYER_FEATURES = int(
     MediaPlayerEntityFeature.PLAY_MEDIA
@@ -170,11 +190,14 @@ def _entry(
 async def test_user_flow_creates_standby_manual_entry_with_level_sounds(
     hass: HomeAssistant,
 ) -> None:
-    """Setup expands one local sound into independent per-level mappings."""
+    """Setup stores one independently selected local sound for every level."""
     result = await _start_user_flow(hass)
     assert result["type"] is FlowResultType.FORM
     assert result["step_id"] == "user"
     assert NurserySootherConfigFlow.VERSION == ENTRY_VERSION
+    form_keys = {key.schema for key in result["data_schema"].schema}
+    assert set(SOUND_SELECTIONS) <= form_keys
+    assert "soothing_sound" not in form_keys
 
     result = await hass.config_entries.flow.async_configure(
         result["flow_id"], USER_DATA
@@ -190,7 +213,7 @@ async def test_user_flow_creates_standby_manual_entry_with_level_sounds(
     assert result["options"] == ENTRY_OPTIONS
     assert sounds_are_valid(result["data"][CONF_SOUNDS])
     sound_values = list(result["data"][CONF_SOUNDS].values())
-    assert all(sound == SOOTHING_SOUND for sound in sound_values)
+    assert sound_values == list(SOUNDS.values())
     assert len({id(sound) for sound in sound_values}) == len(ACTIVE_LEVELS)
 
 
@@ -206,7 +229,9 @@ def test_sound_mapping_validation_is_ready_for_distinct_level_media() -> None:
         for level in ACTIVE_LEVELS
     }
     assert sounds_are_valid(sounds)
-    assert not sounds_are_valid({SoothingLevel.BASELINE.value: SOOTHING_SOUND})
+    assert not sounds_are_valid(
+        {SoothingLevel.BASELINE.value: SOUNDS[SoothingLevel.BASELINE.value]}
+    )
     sounds[SoothingLevel.LEVEL_4.value]["media_content_type"] = "video/mp4"
     assert not sounds_are_valid(sounds)
 
@@ -336,13 +361,13 @@ async def test_user_flow_rejects_unsafe_soothing_sound(
     media: dict[str, str],
     error_key: str,
 ) -> None:
-    """Only local audio may be cloned into the level catalog."""
+    """Only local audio may be selected for a level."""
     result = await _start_user_flow(hass)
     result = await hass.config_entries.flow.async_configure(
-        result["flow_id"], USER_DATA | {CONF_SOOTHING_SOUND: media}
+        result["flow_id"], USER_DATA | {CONF_LEVEL_2_SOUND: media}
     )
     assert result["type"] is FlowResultType.FORM
-    assert result["errors"] == {CONF_SOOTHING_SOUND: error_key}
+    assert result["errors"] == {CONF_LEVEL_2_SOUND: error_key}
 
 
 @pytest.mark.parametrize(
@@ -439,15 +464,30 @@ async def test_entries_cannot_share_a_nursery_device(
 async def test_reconfigure_round_trips_stored_sound_mapping(
     hass: HomeAssistant,
 ) -> None:
-    """Reconfigure presents one sound selector and stores a complete mapping."""
+    """Reconfigure presents and updates independent per-level selectors."""
     entry = _entry(hass)
     hass.states.async_set("camera.second_nursery", "idle")
-    updated_form = USER_DATA | {CONF_CAMERA: "camera.second_nursery"}
+    replacement = {
+        "media_content_id": "media-source://media_source/local/level_3-new.mp3",
+        "media_content_type": "audio/mpeg",
+    }
+    updated_form = USER_DATA | {
+        CONF_CAMERA: "camera.second_nursery",
+        CONF_LEVEL_3_SOUND: replacement,
+    }
     result = await hass.config_entries.flow.async_init(
         DOMAIN,
         context={"source": SOURCE_RECONFIGURE, "entry_id": entry.entry_id},
     )
     assert result["step_id"] == "reconfigure"
+    suggested_values = {
+        key.schema: key.description["suggested_value"]
+        for key in result["data_schema"].schema
+        if isinstance(key.description, dict)
+    }
+    assert {
+        config_key: suggested_values[config_key] for config_key in SOUND_SELECTIONS
+    } == SOUND_SELECTIONS
 
     result = await hass.config_entries.flow.async_configure(
         result["flow_id"], updated_form
@@ -455,8 +495,10 @@ async def test_reconfigure_round_trips_stored_sound_mapping(
     assert result["type"] is FlowResultType.ABORT
     assert result["reason"] == "reconfigure_successful"
     assert entry.data[CONF_CAMERA] == "camera.second_nursery"
-    assert entry.data[CONF_SOUNDS] == SOUNDS
-    assert CONF_SOOTHING_SOUND not in entry.data
+    assert entry.data[CONF_SOUNDS] == SOUNDS | {
+        SoothingLevel.LEVEL_3.value: replacement
+    }
+    assert not set(SOUND_SELECTIONS) & set(entry.data)
     assert entry.options == ENTRY_OPTIONS
 
 
@@ -467,6 +509,7 @@ async def test_options_preserve_runtime_level_and_automatic_preference(
     current_options = ENTRY_OPTIONS | {
         CONF_LEVEL: SoothingLevel.LEVEL_3.value,
         CONF_AUTOMATIC_OPERATION: True,
+        CONF_LEVEL_LOCK: True,
     }
     entry = _entry(hass, options=current_options)
     updated_behavior = BEHAVIOR_DATA | {
@@ -485,6 +528,7 @@ async def test_options_preserve_runtime_level_and_automatic_preference(
     expected = updated_behavior | {
         CONF_LEVEL: SoothingLevel.LEVEL_3.value,
         CONF_AUTOMATIC_OPERATION: True,
+        CONF_LEVEL_LOCK: True,
     }
     assert result["type"] is FlowResultType.CREATE_ENTRY
     assert result["data"] == expected

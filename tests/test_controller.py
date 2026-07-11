@@ -39,6 +39,7 @@ from custom_components.nursery_soother.const import (
     CONF_LEVEL_2_VOLUME,
     CONF_LEVEL_3_VOLUME,
     CONF_LEVEL_4_VOLUME,
+    CONF_LEVEL_LOCK,
     CONF_MAX_VOLUME,
     CONF_MEDIA_PLAYER,
     CONF_NOTIFY_TARGETS,
@@ -795,6 +796,7 @@ async def test_unresolved_150_second_episode_enters_standby_and_attention(
     """A held cry reaches the fixed safety cutoff and stops owned playback."""
     controller, calls = started_controller
     stop_count = len(_media_calls(calls, SERVICE_MEDIA_STOP))
+    await controller.async_set_locked(locked=True)
 
     await _set_cry(hass, "on")
     await _advance(hass, 7)
@@ -809,6 +811,7 @@ async def test_unresolved_150_second_episode_enters_standby_and_attention(
     assert controller.state is SootherState.ATTENTION_REQUIRED
     assert controller.recommendation is Recommendation.ATTEND
     assert controller.attention_required
+    assert controller.locked is True
     assert len(_media_calls(calls, SERVICE_MEDIA_STOP)) == stop_count + 1
 
 
@@ -904,6 +907,80 @@ async def test_automatic_toggle_persists_without_changing_output(
     assert controller.entry.options[CONF_AUTOMATIC_OPERATION] is False
     assert controller.level is SoothingLevel.BASELINE
     assert len(calls.media) == media_count
+
+
+async def test_level_lock_blocks_automatic_response_but_allows_parent_level(
+    hass: HomeAssistant,
+    started_controller: tuple[NurserySootherController, RecordedCalls],
+) -> None:
+    """Lock freezes policy output while an exact parent selection still works."""
+    controller, calls = started_controller
+    await controller.async_set_automatic(enabled=True)
+    await controller.async_set_locked(locked=True)
+    volume_count = len(_media_calls(calls, SERVICE_VOLUME_SET))
+
+    await _initial_cry_pulses(hass)
+    await _advance(hass, 9)
+
+    assert controller.locked is True
+    assert controller.entry.options[CONF_LEVEL_LOCK] is True
+    assert controller.level is SoothingLevel.BASELINE
+    assert controller.recommendation is Recommendation.INCREASE_LEVEL
+    assert len(_media_calls(calls, SERVICE_VOLUME_SET)) == volume_count
+
+    await controller.async_set_level(SoothingLevel.LEVEL_2)
+
+    assert controller.locked is True
+    assert controller.level is SoothingLevel.LEVEL_2
+
+
+async def test_unlock_releases_unconfirmed_provisional_without_double_increase(
+    hass: HomeAssistant,
+    started_controller: tuple[NurserySootherController, RecordedCalls],
+) -> None:
+    """Unlock resumes rollback and later confirmation cannot jump to Level 2."""
+    controller, _ = started_controller
+    await controller.async_set_automatic(enabled=True)
+    await _cry_pulse(hass)
+    assert controller.level is SoothingLevel.LEVEL_1
+
+    await controller.async_set_locked(locked=True)
+    await _advance(hass, 21)
+
+    assert controller.level is SoothingLevel.LEVEL_1
+    assert controller.diagnostics["provisional_level_1"] is False
+    assert controller.diagnostics["initial_level_1_applied"] is True
+
+    await controller.async_set_locked(locked=False)
+    assert controller.level is SoothingLevel.BASELINE
+
+    await _cry_pulse(hass)
+
+    assert controller.level is SoothingLevel.LEVEL_1
+    assert controller.diagnostics["cry_episode_confirmed"] is True
+    assert controller.diagnostics["initial_level_1_applied"] is False
+
+
+async def test_level_lock_defers_quiet_downshift_until_unlocked(
+    hass: HomeAssistant,
+    started_controller: tuple[NurserySootherController, RecordedCalls],
+) -> None:
+    """Quiet cannot lower a locked level and gets a fresh interval on unlock."""
+    controller, _ = started_controller
+    await controller.async_set_level(SoothingLevel.LEVEL_3)
+    await controller.async_set_locked(locked=True)
+    await _initial_cry_pulses(hass)
+    await _advance(hass, 190)
+
+    assert controller.level is SoothingLevel.LEVEL_3
+    assert controller.diagnostics["timers"]["settling"] is False
+
+    await controller.async_set_locked(locked=False)
+    await _advance(hass, 119)
+    assert controller.level is SoothingLevel.LEVEL_3
+
+    await _advance(hass, 2)
+    assert controller.level is SoothingLevel.LEVEL_2
 
 
 async def test_disabling_automatic_waits_for_fresh_manual_evidence(

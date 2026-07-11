@@ -31,6 +31,7 @@ from custom_components.nursery_soother.const import (
     CONF_LEVEL_2_VOLUME,
     CONF_LEVEL_3_VOLUME,
     CONF_LEVEL_4_VOLUME,
+    CONF_LEVEL_LOCK,
     CONF_MAX_VOLUME,
     DOMAIN,
     NAME,
@@ -50,7 +51,7 @@ if TYPE_CHECKING:
     from homeassistant.helpers.entity import Entity
 
 PERCENTAGE_MAX = 100
-ENTITY_COUNT = 12
+ENTITY_COUNT = 13
 
 
 @dataclass
@@ -69,6 +70,7 @@ class _FakeController:
     def __init__(self) -> None:
         self.level = SoothingLevel.STANDBY
         self.automatic = False
+        self.locked = False
         self.state = SootherState.STANDBY
         self.recommendation = Recommendation.START
         self.suggested_level: SoothingLevel | None = None
@@ -103,6 +105,12 @@ class _FakeController:
         """Record and apply an operating-mode change."""
         self.calls.append((CONF_AUTOMATIC_OPERATION, enabled))
         self.automatic = enabled
+        self.emit()
+
+    async def async_set_locked(self, *, locked: bool) -> None:
+        """Record and apply a level-lock change."""
+        self.calls.append((CONF_LEVEL_LOCK, locked))
+        self.locked = locked
         self.emit()
 
     async def async_simulate_cry_event(self) -> None:
@@ -158,7 +166,7 @@ async def test_shared_metadata_availability_and_listener_lifecycle(
     entry: MockConfigEntry,
     controller: _FakeController,
 ) -> None:
-    """The twelve entities share stable metadata and observable updates."""
+    """The thirteen entities share stable metadata and observable updates."""
     entities = await _all_entities(hass, entry)
 
     expected_keys = {
@@ -167,6 +175,7 @@ async def test_shared_metadata_availability_and_listener_lifecycle(
         "attention_required",
         CONF_LEVEL,
         CONF_AUTOMATIC_OPERATION,
+        CONF_LEVEL_LOCK,
         SERVICE_SIMULATE_CRY_EVENT,
         CONF_BASELINE_VOLUME,
         CONF_LEVEL_1_VOLUME,
@@ -256,6 +265,27 @@ async def test_automatic_switch_delegates_to_controller(
     assert controller.calls == [
         (CONF_AUTOMATIC_OPERATION, True),
         (CONF_AUTOMATIC_OPERATION, False),
+    ]
+
+
+async def test_level_lock_switch_delegates_to_controller(
+    hass: HomeAssistant,
+    entry: MockConfigEntry,
+    controller: _FakeController,
+) -> None:
+    """Level lock is a primary control that preserves parent exact selection."""
+    entities: list[switch_platform.NurserySootherLevelLockSwitch] = []
+    await switch_platform.async_setup_entry(hass, entry, entities.extend)
+    level_lock = entities[1]
+
+    assert level_lock.entity_description.translation_key == "level_lock"
+    assert level_lock.entity_category is None
+    assert level_lock.is_on is False
+    await level_lock.async_turn_on()
+    await level_lock.async_turn_off()
+    assert controller.calls == [
+        (CONF_LEVEL_LOCK, True),
+        (CONF_LEVEL_LOCK, False),
     ]
 
 

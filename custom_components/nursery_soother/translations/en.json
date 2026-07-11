@@ -4,16 +4,24 @@
     "step": {
       "user": {
         "title": "Set up Nursery Soother",
-        "description": "Select the nursery devices, soothing audio, and at least one Home Assistant Companion App notification action.",
+        "description": "Select the nursery devices, local audio for each soothing level, and at least one Home Assistant Companion App notification action.",
         "data": {
           "cry_sensor": "Cry-detection sensor",
           "camera": "Camera",
           "media_player": "Media player",
-          "soothing_sound": "Soothing sound",
+          "baseline_sound": "Baseline sound",
+          "level_1_sound": "Level 1 sound",
+          "level_2_sound": "Level 2 sound",
+          "level_3_sound": "Level 3 sound",
+          "level_4_sound": "Level 4 sound",
           "notify_targets": "Parent notification actions"
         },
         "data_description": {
-          "soothing_sound": "Choose local audio for every soothing level. Per-level sound choices can be added later.",
+          "baseline_sound": "Choose local audio to play at Baseline.",
+          "level_1_sound": "Choose local audio to play at Level 1.",
+          "level_2_sound": "Choose local audio to play at Level 2.",
+          "level_3_sound": "Choose local audio to play at Level 3.",
+          "level_4_sound": "Choose local audio to play at Level 4.",
           "notify_targets": "Enter one or more registered actions such as notify.mobile_app_parent_phone."
         }
       },
@@ -37,16 +45,24 @@
       },
       "reconfigure": {
         "title": "Reconfigure Nursery Soother",
-        "description": "Update the nursery devices, soothing audio, or parent notification actions.",
+        "description": "Update the nursery devices, per-level soothing audio, or parent notification actions.",
         "data": {
           "cry_sensor": "Cry-detection sensor",
           "camera": "Camera",
           "media_player": "Media player",
-          "soothing_sound": "Soothing sound",
+          "baseline_sound": "Baseline sound",
+          "level_1_sound": "Level 1 sound",
+          "level_2_sound": "Level 2 sound",
+          "level_3_sound": "Level 3 sound",
+          "level_4_sound": "Level 4 sound",
           "notify_targets": "Parent notification actions"
         },
         "data_description": {
-          "soothing_sound": "Choose local audio for every soothing level. Per-level sound choices can be added later.",
+          "baseline_sound": "Choose local audio to play at Baseline.",
+          "level_1_sound": "Choose local audio to play at Level 1.",
+          "level_2_sound": "Choose local audio to play at Level 2.",
+          "level_3_sound": "Choose local audio to play at Level 3.",
+          "level_4_sound": "Choose local audio to play at Level 4.",
           "notify_targets": "Enter one or more registered actions such as notify.mobile_app_parent_phone."
         }
       }
@@ -112,6 +128,9 @@
     "switch": {
       "automatic_operation": {
         "name": "Automatic operation"
+      },
+      "level_lock": {
+        "name": "Level lock"
       }
     },
     "sensor": {

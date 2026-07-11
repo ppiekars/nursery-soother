@@ -31,24 +31,30 @@ from homeassistant.helpers.selector import (
 from .const import (
     CONF_ATTENTION_SECONDS,
     CONF_AUTOMATIC_OPERATION,
+    CONF_BASELINE_SOUND,
     CONF_BASELINE_VOLUME,
     CONF_CRY_GAP_SECONDS,
     CONF_DEBOUNCE_SECONDS,
     CONF_EVIDENCE_WINDOW_SECONDS,
     CONF_LEVEL,
+    CONF_LEVEL_1_SOUND,
     CONF_LEVEL_1_VOLUME,
+    CONF_LEVEL_2_SOUND,
     CONF_LEVEL_2_VOLUME,
+    CONF_LEVEL_3_SOUND,
     CONF_LEVEL_3_VOLUME,
+    CONF_LEVEL_4_SOUND,
     CONF_LEVEL_4_VOLUME,
+    CONF_LEVEL_LOCK,
     CONF_LEVEL_UP_SECONDS,
     CONF_MAX_VOLUME,
     CONF_MEDIA_PLAYER,
     CONF_NOTIFY_TARGETS,
     CONF_SETTLING_SECONDS,
-    CONF_SOOTHING_SOUND,
     CONF_SOUNDS,
     DEFAULT_AUTOMATIC_OPERATION,
     DEFAULT_LEVEL,
+    DEFAULT_LEVEL_LOCK,
     DEFAULT_OPTIONS,
     DOMAIN,
     ENTITY_DOMAINS,
@@ -68,6 +74,13 @@ _STOP_MEDIA_PLAYER_FEATURES = (
     MediaPlayerEntityFeature.STOP | MediaPlayerEntityFeature.PAUSE
 )
 _NOTIFY_ACTION_PREFIX = "notify.mobile_app_"
+_LEVEL_SOUND_KEYS = {
+    SoothingLevel.BASELINE: CONF_BASELINE_SOUND,
+    SoothingLevel.LEVEL_1: CONF_LEVEL_1_SOUND,
+    SoothingLevel.LEVEL_2: CONF_LEVEL_2_SOUND,
+    SoothingLevel.LEVEL_3: CONF_LEVEL_3_SOUND,
+    SoothingLevel.LEVEL_4: CONF_LEVEL_4_SOUND,
+}
 _VOLUME_KEYS = (
     CONF_BASELINE_VOLUME,
     CONF_LEVEL_1_VOLUME,
@@ -99,6 +112,7 @@ _TIMER_SELECTOR = NumberSelector(
         mode=NumberSelectorMode.BOX,
     )
 )
+_AUDIO_MEDIA_SELECTOR = MediaSelector(MediaSelectorConfig(accept=["audio/*"]))
 
 BEHAVIOR_SCHEMA = vol.Schema(
     {
@@ -136,11 +150,6 @@ def sounds_are_valid(sounds: object) -> bool:
     )
 
 
-def _sounds_from_media(media: dict[str, str]) -> dict[str, dict[str, str]]:
-    """Build independent per-level mappings from the initial shared sound."""
-    return {level.value: dict(media) for level in ACTIVE_LEVELS}
-
-
 def _stable_data_schema(hass: HomeAssistant) -> vol.Schema:
     """Build stable selectors with the currently registered mobile actions."""
     notify_actions = sorted(
@@ -156,9 +165,10 @@ def _stable_data_schema(hass: HomeAssistant) -> vol.Schema:
             for config_key, expected_domain in ENTITY_DOMAINS.items()
         }
         | {
-            vol.Required(CONF_SOOTHING_SOUND): MediaSelector(
-                MediaSelectorConfig(accept=["audio/*"])
-            ),
+            **{
+                vol.Required(config_key): _AUDIO_MEDIA_SELECTOR
+                for config_key in _LEVEL_SOUND_KEYS.values()
+            },
             vol.Required(CONF_NOTIFY_TARGETS): SelectSelector(
                 SelectSelectorConfig(
                     options=notify_actions,
@@ -172,14 +182,30 @@ def _stable_data_schema(hass: HomeAssistant) -> vol.Schema:
 
 
 def _stable_suggested_values(data: dict[str, Any]) -> dict[str, Any]:
-    """Translate stored per-level sounds back to the current shared selector."""
+    """Translate stored per-level sounds back to the form selectors."""
     suggested = {key: value for key, value in data.items() if key != CONF_SOUNDS}
     sounds = data.get(CONF_SOUNDS)
     if isinstance(sounds, dict):
-        baseline = sounds.get(SoothingLevel.BASELINE.value)
-        if isinstance(baseline, dict):
-            suggested[CONF_SOOTHING_SOUND] = baseline
+        for level, config_key in _LEVEL_SOUND_KEYS.items():
+            media = sounds.get(level.value)
+            if isinstance(media, dict):
+                suggested[config_key] = media
     return suggested
+
+
+def _normalize_sounds(
+    user_input: dict[str, Any],
+) -> tuple[dict[str, dict[str, str]], dict[str, str]]:
+    """Validate and build the complete per-level sound map."""
+    sounds: dict[str, dict[str, str]] = {}
+    errors: dict[str, str] = {}
+    for level, config_key in _LEVEL_SOUND_KEYS.items():
+        media = user_input[config_key]
+        if media_error := _media_validation_error(media):
+            errors[config_key] = media_error
+        else:
+            sounds[level.value] = dict(media)
+    return sounds, errors
 
 
 def _normalize_stable_data(
@@ -222,11 +248,9 @@ def _normalize_stable_data(
 
         normalized_data[config_key] = entity_id
 
-    media = user_input[CONF_SOOTHING_SOUND]
-    if media_error := _media_validation_error(media):
-        errors[CONF_SOOTHING_SOUND] = media_error
-    else:
-        normalized_data[CONF_SOUNDS] = _sounds_from_media(media)
+    sounds, sound_errors = _normalize_sounds(user_input)
+    errors.update(sound_errors)
+    normalized_data[CONF_SOUNDS] = sounds
 
     normalized_targets, target_error = _normalize_notify_targets(
         hass, user_input[CONF_NOTIFY_TARGETS]
@@ -288,6 +312,7 @@ def _normalize_behavior(
     *,
     level: str,
     automatic_operation: bool,
+    level_lock: bool,
 ) -> tuple[dict[str, float | int | bool | str], dict[str, str]]:
     """Validate behavior values and return their persisted representation."""
     normalized: dict[str, float | int | bool | str] = {
@@ -304,6 +329,7 @@ def _normalize_behavior(
 
     normalized[CONF_LEVEL] = level
     normalized[CONF_AUTOMATIC_OPERATION] = automatic_operation
+    normalized[CONF_LEVEL_LOCK] = level_lock
     if errors:
         return normalized, errors
 
@@ -361,6 +387,7 @@ class NurserySootherConfigFlow(ConfigFlow, domain=DOMAIN):
                 user_input,
                 level=DEFAULT_LEVEL,
                 automatic_operation=DEFAULT_AUTOMATIC_OPERATION,
+                level_lock=DEFAULT_LEVEL_LOCK,
             )
             if not errors:
                 if _find_entry_conflicts(self.hass, self._stable_data):
@@ -422,6 +449,7 @@ class NurserySootherOptionsFlow(OptionsFlowWithReload):
                 user_input,
                 level=str(current_options[CONF_LEVEL]),
                 automatic_operation=bool(current_options[CONF_AUTOMATIC_OPERATION]),
+                level_lock=bool(current_options[CONF_LEVEL_LOCK]),
             )
             if not errors:
                 return self.async_create_entry(title="", data=options)

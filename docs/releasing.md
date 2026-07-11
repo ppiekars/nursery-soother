@@ -27,7 +27,7 @@ Use semantic versions. Keep the version in
 `custom_components/nursery_soother/manifest.json` aligned with the published
 release and project metadata.
 
-Create a matching GitHub release tag such as `v0.5.0`. HACS does not treat a
+Create a matching GitHub release tag such as `v0.6.0`. HACS does not treat a
 tag without a published GitHub release as a release. Do not publish the tag
 until the exact commit has passed automated validation and the live Home
 Assistant smoke test.
@@ -36,7 +36,7 @@ Assistant smoke test.
 
 Every release in this product line retains these safety semantics:
 
-- new entries start at Standby with Automatic operation off;
+- new entries start at Standby with Automatic operation and Level lock off;
 - while already in Standby, physical cry events and the simulated event command
   are no-ops, playback is not changed, and Automatic operation cannot leave it;
 - one exact select owns Standby, Baseline, and Levels 1–4;
@@ -44,8 +44,8 @@ Every release in this product line retains these safety semantics:
   controls do not reappear under different names;
 - Baseline and Levels 1–4 have monotonic configured volumes, all bounded by
   Maximum;
-- the current single media item is represented by a per-level sound map even
-  while all active levels point to the same MP3;
+- Baseline and Levels 1–4 each map to a selected local audio item, with reuse of
+  the same item allowed;
 - off-to-on cry transitions are event samples; one short falling edge is not
   treated as a settled child;
 - initial confirmation uses two events or eight cumulative active seconds in a
@@ -57,13 +57,16 @@ Every release in this product line retains these safety semantics:
 - a 60-second no-event gap closes the active cry episode;
 - manual mode recommends one exact next level and never changes it;
 - Automatic operation changes upward only, exactly one level per decision;
+- Level lock prevents provisional increases, automatic increases, and quiet
+  downshifts while leaving exact parent selections and Standby available;
 - each subsequent response decision waits at least 20 seconds and requires one
   fresh event or six fresh active seconds; automatic mode applies the next
   level while manual mode only suggests it;
 - both modes step down one level after each uninterrupted 120-second quiet
   interval and stop downshifting at Baseline;
 - a fixed 150-second deadline from episode confirmation enters Standby and
-  requests caregiver attention if the episode remains active;
+  requests caregiver attention if the episode remains active, including while
+  Level lock is on;
 - unavailable dependencies and playback takeover fail safe;
 - restart discards transient evidence, timers, and notification action IDs;
 - no action can exceed Level 4, Maximum volume, or alter media the integration
@@ -101,11 +104,13 @@ The test suite must cover:
 - manual exact-level suggestion without any volume action;
 - automatic one-level increase, 20-second dwell, fresh-evidence boundary, and
   Level 4 ceiling;
+- Level lock persistence, provisional-response handling, blocked increases,
+  deferred quiet downshift, manual override, and attention safety override;
 - one-level quiet downshift every 120 seconds in both modes;
 - attention at 150 seconds from confirmation, including cancellation on event
   gap and Standby at expiry;
 - exact media-player and notification payloads;
-- same-media mapping for all active levels and per-level-ready resolution;
+- distinct and reused per-level media mappings and exact-level resolution;
 - stale notification rejection after level selection, episode close, Standby,
   reload, and restart;
 - config-entry setup, reload, unload, and listener/timer cleanup;
@@ -131,11 +136,11 @@ against a sleeping child or an unverified speaker.
    directory.
 2. Restart Home Assistant and confirm the integration loads without errors.
 3. Add Nursery Soother from **Settings > Devices & services**.
-4. Select a cry binary sensor, camera, media player, local sound, and test
-   Companion app notification actions.
-5. Confirm the level select, Automatic operation switch, state and
-   recommendation sensors, attention binary sensor, six numbers, and Simulate
-   cry event button exist.
+4. Select a cry binary sensor, camera, media player, one local sound for each
+   active level, and test Companion app notification actions.
+5. Confirm the level select, Automatic operation and Level lock switches, state
+   and recommendation sensors, attention binary sensor, six numbers, and
+   Simulate cry event button exist.
 6. Confirm the level is Standby and Automatic operation is off.
 7. Confirm setup did not play media or change volume.
 
@@ -147,7 +152,9 @@ against a sleeping child or an unverified speaker.
    and starts the selected media.
 3. Select each of Levels 1–4 in a non-linear order. Confirm each command uses
    that exact level's volume and does not behave like an increment button.
-4. Confirm every active level currently resolves to the same selected MP3.
+4. Configure at least two distinct tracks and reuse one track for at least two
+   levels. Confirm each level resolves its exact mapping and playback restarts
+   only when the source changes.
 5. Lower Maximum through a deliberately malformed test fixture, not production
    options, and confirm no command exceeds it.
 6. Select Standby. Confirm integration-owned playback stops or safely pauses,
@@ -278,10 +285,11 @@ Before tagging, compare the implementation with:
   notifications, safety, limitations, and troubleshooting;
 - `docs/architecture.md` evidence generations, timers, side-effect guards,
   ownership, and attention invariants;
-- `examples/dashboard.yaml` level select, Automatic operation switch, six
+- `examples/dashboard.yaml` level select, Automatic operation and Level lock
+  switches, six
   numbers, status entities, and confirmed artificial-event action;
-- `product_pitch.md` so per-level sounds and other deferred features are not
-  accidentally advertised as implemented.
+- `product_pitch.md` so implemented per-level sounds and remaining deferred
+  features are described accurately.
 
 Search the release tree for obsolete user-facing terms such as `Boost`,
 `Return to baseline`, `Acknowledge`, boost cooldown, and an enabled switch.
@@ -293,10 +301,11 @@ Release notes must highlight:
 - removal of the old development-only controls;
 - any required remove-and-reintegrate step;
 - the six exact levels and Automatic operation default off;
+- Level lock default off and its parent-control and safety overrides;
 - five level volumes plus Maximum;
 - the pulse-event confirmation rule and timing defaults;
 - gradual quiet downshift and the 150-second Standby/attention cutoff;
-- the single MP3 currently reused by every active level;
+- the independent Local Media selection for every active level;
 - any change that can start, stop, or alter speaker playback;
 - the reminder that Nursery Soother is not a medical device or substitute for
   adult supervision.

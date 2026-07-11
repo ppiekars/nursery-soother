@@ -25,6 +25,8 @@ cards:
         name: Soothing level
       - entity: switch.nursery_soother_automatic_operation
         name: Automatic operation
+      - entity: switch.nursery_soother_level_lock
+        name: Level lock
       - entity: sensor.nursery_soother_state
         name: State
       - entity: sensor.nursery_soother_recommendation

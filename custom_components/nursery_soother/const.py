@@ -6,6 +6,7 @@ from homeassistant.const import Platform
 
 CONF_ATTENTION_SECONDS = "attention_seconds"
 CONF_AUTOMATIC_OPERATION = "automatic_operation"
+CONF_BASELINE_SOUND = "baseline_sound"
 CONF_BASELINE_VOLUME = "baseline_volume"
 CONF_CAMERA = "camera"
 CONF_CRY_GAP_SECONDS = "cry_gap_seconds"
@@ -13,16 +14,20 @@ CONF_CRY_SENSOR = "cry_sensor"
 CONF_DEBOUNCE_SECONDS = "debounce_seconds"
 CONF_EVIDENCE_WINDOW_SECONDS = "evidence_window_seconds"
 CONF_LEVEL = "level"
+CONF_LEVEL_LOCK = "level_lock"
+CONF_LEVEL_1_SOUND = "level_1_sound"
 CONF_LEVEL_1_VOLUME = "level_1_volume"
+CONF_LEVEL_2_SOUND = "level_2_sound"
 CONF_LEVEL_2_VOLUME = "level_2_volume"
+CONF_LEVEL_3_SOUND = "level_3_sound"
 CONF_LEVEL_3_VOLUME = "level_3_volume"
+CONF_LEVEL_4_SOUND = "level_4_sound"
 CONF_LEVEL_4_VOLUME = "level_4_volume"
 CONF_LEVEL_UP_SECONDS = "level_up_seconds"
 CONF_MAX_VOLUME = "max_volume"
 CONF_MEDIA_PLAYER = "media_player"
 CONF_NOTIFY_TARGETS = "notify_targets"
 CONF_SETTLING_SECONDS = "settling_seconds"
-CONF_SOOTHING_SOUND = "soothing_sound"
 CONF_SOUNDS = "sounds"
 
 DEFAULT_ATTENTION_SECONDS = 150
@@ -32,6 +37,7 @@ DEFAULT_CRY_GAP_SECONDS = 60
 DEFAULT_DEBOUNCE_SECONDS = 8
 DEFAULT_EVIDENCE_WINDOW_SECONDS = 30
 DEFAULT_LEVEL = "standby"
+DEFAULT_LEVEL_LOCK = False
 DEFAULT_LEVEL_1_VOLUME = 15.0
 DEFAULT_LEVEL_2_VOLUME = 20.0
 DEFAULT_LEVEL_3_VOLUME = 25.0
@@ -42,6 +48,7 @@ DEFAULT_SETTLING_SECONDS = 120
 
 DEFAULT_OPTIONS: Final[dict[str, float | int | bool | str]] = {
     CONF_LEVEL: DEFAULT_LEVEL,
+    CONF_LEVEL_LOCK: DEFAULT_LEVEL_LOCK,
     CONF_AUTOMATIC_OPERATION: DEFAULT_AUTOMATIC_OPERATION,
     CONF_BASELINE_VOLUME: DEFAULT_BASELINE_VOLUME,
     CONF_LEVEL_1_VOLUME: DEFAULT_LEVEL_1_VOLUME,
@@ -58,7 +65,7 @@ DEFAULT_OPTIONS: Final[dict[str, float | int | bool | str]] = {
 }
 
 DOMAIN = "nursery_soother"
-ENTRY_VERSION = 5
+ENTRY_VERSION = 6
 EVENT_NOTIFICATION_ACTION = "mobile_app_notification_action"
 NAME = "Nursery Soother"
 NOTIFICATION_ACTION_PREFIX = "NURSERY_SOOTHER"

@@ -64,10 +64,9 @@ Baseline <= Level 1 <= Level 2 <= Level 3
          <= Level 4 <= Maximum
 ```
 
-The output model also maps a soothing sound to every active level. The initial
-release keeps setup simple by mapping the same selected MP3 to Baseline and all
-four response levels. Later per-level sound choices can use the same policy
-without redesigning the controller.
+The output model maps an independently selected Local Media sound to every
+active level. Families may select distinct tracks or reuse one item across
+multiple levels without changing the response policy.
 
 Standby is a hard off boundary. Physical cry events are ignored, the artificial
 cry-event button is a no-op, and Automatic operation cannot start a soothing
@@ -156,13 +155,14 @@ Nursery Soother consumes standard Home Assistant capabilities:
 - a cry-detection `binary_sensor`, such as a Reolink camera's baby-cry sensor;
 - a `camera` entity for caregiver context;
 - a `media_player`, such as Sonos;
-- one local Media browser sound, currently reused for every active level;
+- one Local Media browser sound for each active level;
 - one or more Companion app `notify.mobile_app_*` actions.
 
 It provides:
 
 - one exact level select containing Standby, Baseline, and Levels 1–4;
 - an Automatic operation switch;
+- a Level lock switch that freezes policy changes without blocking parents;
 - six safe volume controls: five levels plus Maximum;
 - a policy-state sensor and recommendation sensor;
 - a caregiver-attention binary sensor;
@@ -183,18 +183,20 @@ After installation, a user adds **Nursery Soother** from the Integrations page:
 1. select the cry sensor;
 2. select the nursery camera;
 3. select the speaker;
-4. choose a soothing sound from **Local media** in the Media browser;
+4. choose a **Local media** sound for Baseline and each of Levels 1–4;
 5. select parent notification targets;
 6. review Baseline, Level 1–4, and Maximum volumes;
 7. review evidence, dwell, quiet, and attention timings;
 8. leave Standby only after testing the actual speaker;
 9. enable Automatic operation only after validating manual suggestions.
+10. use Level lock when a parent wants policy output held at an exact level.
 
 The integration creates standard entities similar to:
 
 ```text
 select.nursery_soother_level
 switch.nursery_soother_automatic_operation
+switch.nursery_soother_level_lock
 sensor.nursery_soother_state
 sensor.nursery_soother_recommendation
 binary_sensor.nursery_soother_attention_required
@@ -250,7 +252,6 @@ The first level-based release includes:
 
 Later releases can add:
 
-- a distinct sound selector for each active level;
 - schedules or bedtime windows;
 - multiple detection inputs and Frigate audio events;
 - long-term response analytics and evidence tuning tools;
