@@ -579,6 +579,73 @@ async def test_automatic_two_pulse_evidence_raises_exactly_one_level(
     assert all(
         "Level 1" in call.data["message"] for call in _incident_notifications(calls)
     )
+    assert controller.diagnostics["provisional_level_1"] is False
+    assert controller.diagnostics["timers"]["provisional"] is False
+
+
+async def test_first_cry_event_immediately_starts_provisional_level_1(
+    hass: HomeAssistant,
+    started_controller: tuple[NurserySootherController, RecordedCalls],
+) -> None:
+    """One physical event gets a mild response before confirmation."""
+    controller, calls = started_controller
+    await controller.async_set_automatic(enabled=True)
+    volume_count = len(_media_calls(calls, SERVICE_VOLUME_SET))
+
+    await _cry_pulse(hass)
+
+    assert controller.level is SoothingLevel.LEVEL_1
+    assert controller.state is SootherState.CRY_PENDING
+    assert controller.recommendation is Recommendation.WAIT
+    assert controller.diagnostics["provisional_level_1"] is True
+    assert controller.diagnostics["timers"]["provisional"] is True
+    assert len(_media_calls(calls, SERVICE_VOLUME_SET)) == volume_count + 1
+    assert _media_calls(calls, SERVICE_VOLUME_SET)[-1].data[
+        ATTR_MEDIA_VOLUME_LEVEL
+    ] == pytest.approx(LEVEL_1_PERCENT / 100)
+    assert not _incident_notifications(calls)
+
+
+async def test_unconfirmed_provisional_level_1_returns_to_baseline_after_dwell(
+    hass: HomeAssistant,
+    started_controller: tuple[NurserySootherController, RecordedCalls],
+) -> None:
+    """A lone event gets only one bounded 20-second Level 1 response."""
+    controller, calls = started_controller
+    await controller.async_set_automatic(enabled=True)
+    await _cry_pulse(hass)
+
+    await _advance(hass, 19)
+    assert controller.level is SoothingLevel.LEVEL_1
+
+    await _advance(hass, 2)
+
+    assert controller.level is SoothingLevel.BASELINE
+    assert controller.state is SootherState.CRY_PENDING
+    assert controller.recommendation is Recommendation.WAIT
+    assert controller.diagnostics["provisional_level_1"] is False
+    assert controller.diagnostics["timers"]["provisional"] is False
+    assert _media_calls(calls, SERVICE_VOLUME_SET)[-1].data[
+        ATTR_MEDIA_VOLUME_LEVEL
+    ] == pytest.approx(BASELINE_PERCENT / 100)
+    assert not _incident_notifications(calls)
+
+
+async def test_disabling_automatic_rolls_back_provisional_level_1(
+    hass: HomeAssistant,
+    started_controller: tuple[NurserySootherController, RecordedCalls],
+) -> None:
+    """Turning off automatic operation immediately ends its provisional effect."""
+    controller, _ = started_controller
+    await controller.async_set_automatic(enabled=True)
+    await _cry_pulse(hass)
+
+    await controller.async_set_automatic(enabled=False)
+
+    assert controller.automatic is False
+    assert controller.level is SoothingLevel.BASELINE
+    assert controller.diagnostics["provisional_level_1"] is False
+    assert controller.diagnostics["timers"]["provisional"] is False
 
 
 async def test_automatic_does_not_reuse_evidence_for_another_level(
@@ -603,12 +670,12 @@ async def test_automatic_requires_fresh_evidence_and_level_dwell(
     """One fresh post-change event waits for the 20-second Level 1 dwell."""
     controller, calls = started_controller
     await _enable_automatic_and_confirm(hass, controller)
-    await _advance(hass, 10)
+    await _advance(hass, 5)
     await _cry_pulse(hass)
     volume_count = len(_media_calls(calls, SERVICE_VOLUME_SET))
 
     assert controller.level is SoothingLevel.LEVEL_1
-    await _advance(hass, 9)
+    await _advance(hass, 5)
     assert controller.level is SoothingLevel.LEVEL_1
     assert len(_media_calls(calls, SERVICE_VOLUME_SET)) == volume_count
 
@@ -625,17 +692,20 @@ async def test_held_cry_uses_fresh_active_time_after_each_increase(
     hass: HomeAssistant,
     started_controller: tuple[NurserySootherController, RecordedCalls],
 ) -> None:
-    """A held sensor needs 8 seconds initially and 6 fresh seconds after reset."""
+    """A held sensor responds now, confirms at 8 seconds, then needs 6 fresh."""
     controller, calls = started_controller
     controller.settings.level_up_seconds = 1
     await controller.async_set_automatic(enabled=True)
     await _set_cry(hass, "on")
 
+    assert controller.level is SoothingLevel.LEVEL_1
     await _advance(hass, 7)
-    assert controller.level is SoothingLevel.BASELINE
+    assert controller.level is SoothingLevel.LEVEL_1
+    assert controller.diagnostics["provisional_level_1"] is True
 
     await _advance(hass, 2)
     assert controller.level is SoothingLevel.LEVEL_1
+    assert controller.diagnostics["provisional_level_1"] is False
     volume_count = len(_media_calls(calls, SERVICE_VOLUME_SET))
 
     await _advance(hass, 5)

@@ -285,6 +285,15 @@ uses the same rolling window but needs one fresh rising edge or six fresh active
 seconds. The conditions are an OR. Evidence falling out of the window cannot
 qualify later.
 
+When Automatic operation is on and the selected level is Baseline, that first
+event also applies Level 1 provisionally. This output change does not mark the
+episode confirmed, start the attention deadline, send a notification, or make
+the continuing-stage threshold eligible. If initial evidence confirms, the
+controller retains Level 1, consumes the initial evidence, and observes the
+remainder of the dwell from the actual provisional response time. If initial
+evidence does not confirm, Level 1 returns to Baseline after one dwell. The
+rollback delay is never shorter than the confirmation debounce.
+
 Every new event refreshes the 60-second event-gap timer. If it expires before
 or after confirmation, the cry episode closes and its attention deadline is
 canceled. The falling edge of one short pulse does not close an episode.
@@ -310,10 +319,12 @@ as the deadline approaches.
 
 ### Automatic response and fresh evidence
 
-When Automatic operation is on, confirmation can advance exactly one active
-level. Standby ignores cry evidence and cannot be left by the policy. A
-caregiver must explicitly select Baseline or another active level before event
-monitoring and automatic response begin.
+When Automatic operation is on, the first event can provisionally move
+Baseline to Level 1 as described above. Confirmation retains that response
+instead of advancing again. From any other starting level, confirmation can
+advance exactly one active level. Standby ignores cry evidence and cannot be
+left by the policy. A caregiver must explicitly select Baseline or another
+active level before event monitoring and automatic response begin.
 
 After each automatic increase, the controller:
 
@@ -546,9 +557,11 @@ without raw camera payloads or notification bodies.
   expiry, two-event and eight-active-second initial confirmation, the default
   eight-second debounce boundary, one-event or six-active-second continuing
   stages, and the 60-second event gap.
-- Automatic tests prove each increase is exactly one level, subsequent
-  increases respect 20-second dwell and require fresh evidence, the controller
-  stops at Level 4, and no increase reuses a prior generation.
+- Automatic tests prove the first event provisionally moves Baseline to Level
+  1, confirmation retains it without a second increase, an unconfirmed response
+  rolls back after one dwell, subsequent increases respect 20-second dwell and
+  require fresh evidence, the controller stops at Level 4, and no increase
+  reuses a prior generation.
 - Manual tests prove confirmation produces an exact suggestion without a level
   or volume change and that the selected exact level is the implicit response.
 - Quiet tests prove one downshift per 120-second uninterrupted interval in both

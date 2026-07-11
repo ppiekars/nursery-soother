@@ -27,7 +27,7 @@ Use semantic versions. Keep the version in
 `custom_components/nursery_soother/manifest.json` aligned with the published
 release and project metadata.
 
-Create a matching GitHub release tag such as `v0.4.0`. HACS does not treat a
+Create a matching GitHub release tag such as `v0.5.0`. HACS does not treat a
 tag without a published GitHub release as a release. Do not publish the tag
 until the exact commit has passed automated validation and the live Home
 Assistant smoke test.
@@ -51,6 +51,9 @@ Every release in this product line retains these safety semantics:
 - initial confirmation uses two events or eight cumulative active seconds in a
   30-second window after the configured debounce, which defaults to eight
   seconds;
+- in automatic mode at Baseline, the first event applies Level 1 provisionally;
+  confirmation retains it, while a lone unconfirmed event returns to Baseline
+  after one dwell without notification or further escalation;
 - a 60-second no-event gap closes the active cry episode;
 - manual mode recommends one exact next level and never changes it;
 - Automatic operation changes upward only, exactly one level per decision;
@@ -91,6 +94,8 @@ The test suite must cover:
 - rising-edge event counting and duplicate-state suppression;
 - rolling 30-second evidence expiry;
 - two-event and eight-active-second initial confirmation paths;
+- immediate provisional Baseline-to-Level-1 response, confirmed retention, and
+  unconfirmed rollback after one dwell;
 - one-event and six-active-second continuing-stage paths;
 - the default eight-second confirmation debounce and 60-second event gap;
 - manual exact-level suggestion without any volume action;
@@ -216,7 +221,9 @@ against a sleeping child or an unverified speaker.
 ### Validate simulation, failures, and recovery
 
 1. Press Simulate cry event after accepting the dashboard confirmation. Confirm
-   one artificial event is added and clearly identified as a test.
+   one artificial event is added and clearly identified as a test. In automatic
+   mode at Baseline, confirm it immediately starts the same provisional Level 1
+   response and returns after one dwell if left unconfirmed.
 2. Press it twice to qualify the initial count threshold and confirm it uses the
    same manual or automatic path as physical events. After the first response,
    verify that one fresh press can qualify the next decision only after the

@@ -6,9 +6,11 @@ SNOO-inspired soothing workflow.
 
 It provides one exact level control: **Standby**, **Baseline**, and **Level 1**
 through **Level 4**. A parent can always select a level directly. An optional
-**Automatic operation** switch allows confirmed, continuing cry events to move
-up one level at a time; with automatic operation off, the integration explains
-the detection and suggests the exact next level instead.
+**Automatic operation** switch gives the first cry event an immediate,
+reversible Baseline-to-Level-1 response, then allows confirmed, continuing cry
+events to move up one level at a time. With automatic operation off, the
+integration explains confirmed evidence and suggests the exact next level
+instead.
 
 > [!IMPORTANT]
 > Nursery Soother is not a medical device, baby monitor, or substitute for
@@ -22,9 +24,11 @@ the detection and suggests the exact next level instead.
 Standby (off)
     ↓ parent selects Baseline or Level 1–4
 Play the sound mapped to that level at its configured, capped volume
+    ↓ first cry event while Automatic is on and Baseline is selected
+Move immediately to Level 1 provisionally; return after one dwell if unconfirmed
     ↓ repeated cry-event evidence is confirmed
 Automatic off: notify and suggest one exact higher level
-Automatic on: move up exactly one level
+Automatic on: keep provisional Level 1, or move up exactly one level otherwise
     ↓ fresh cry evidence continues after the dwell period
 Repeat one level at a time, never above Level 4 or Maximum volume
     ↓ no new cry event for a full quiet interval
@@ -50,6 +54,10 @@ The following rules are deliberate:
   not require the sensor to remain continuously on.
 - A cry candidate must satisfy the configured confirmation debounce and then
   reach either the event-count or cumulative-active-time threshold.
+- With Automatic operation on at Baseline, the first event immediately starts
+  a provisional Level 1 response. Confirmation keeps that response; without
+  confirmation, it returns to Baseline after the level dwell. No caregiver
+  notification or stronger level is triggered by the lone event.
 - Automatic operation changes only upward behavior. It increases exactly one
   level, waits for the dwell period, discards evidence used by the prior
   increase, and requires fresh evidence before another increase.
@@ -165,7 +173,7 @@ The initial defaults are intentionally low and conservative:
 | Continuing evidence threshold | 1 fresh event or 6 fresh active seconds | Required post-response evidence for each later step |
 | Evidence window | 30 seconds | Window used for event count and active time |
 | Cry-event gap | 60 seconds | No-event interval that closes the active cry episode |
-| Level dwell | 20 seconds | Minimum time before another response decision |
+| Level dwell | 20 seconds | Provisional Level 1 grace and minimum time before another response decision |
 | Quiet step-down | 120 seconds | Uninterrupted quiet required for each one-level decrease |
 | Attention timeout | 150 seconds | Fixed deadline from episode confirmation before Standby and caregiver attention |
 
@@ -237,12 +245,16 @@ replace it with a newer suggestion. Choosing the proposed level from the
 notification, dashboard, automation, or Siri calls the same guarded exact-level
 command. Ignoring the suggestion does not change speaker volume.
 
-With **Automatic operation on**, initial confirmation can advance one level.
-A later advance requires both the 20-second dwell and either one fresh
-post-change event or six fresh active seconds; evidence that justified the
-previous change is never reused. Automatic operation cannot skip a level,
-exceed Level 4, bypass Maximum, leave Standby, or override a dependency or
-playback-ownership fault. A parent must select an active level before cry
+With **Automatic operation on** at Baseline, the first cry event immediately
+starts a provisional Level 1 response. If initial evidence confirms, Level 1
+is retained and the normal continuing-evidence policy begins. If it does not
+confirm within the 20-second level dwell, the controller returns to Baseline
+without notifying caregivers. At higher starting levels, initial confirmation
+still precedes any increase. A later advance requires both the dwell and either
+one fresh post-change event or six fresh active seconds; evidence that justified
+the previous response is never reused. Automatic operation cannot skip a
+level, exceed Level 4, bypass Maximum, leave Standby, or override a dependency
+or playback-ownership fault. A parent must select an active level before cry
 response monitoring begins.
 
 In both modes, each 120-second uninterrupted quiet interval moves down one
@@ -336,6 +348,9 @@ active seconds occur inside 30 seconds and that the configured confirmation
 debounce—eight seconds by default—has elapsed. Later steps accept one fresh
 event or six fresh active seconds after the dwell. Confirm the integration is
 not in Standby and its camera, speaker, and notification targets are available.
+In automatic mode at Baseline, one isolated event may still produce a quiet,
+provisional Level 1 response, but it intentionally does not notify unless the
+episode confirms.
 
 ### Automatic operation does not increase again immediately
 

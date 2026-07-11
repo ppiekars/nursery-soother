@@ -12,6 +12,7 @@ Standby → Baseline → Level 1 → Level 2 → Level 3 → Level 4
 ```
 
 A parent can select any level exactly. An optional Automatic operation switch
+gives the first event an immediate, reversible Baseline-to-Level-1 response and
 allows confirmed, continuing cry events to move upward one level at a time.
 With automatic operation disabled, Nursery Soother explains why crying was
 inferred and suggests the exact next level without changing it.
@@ -25,6 +26,8 @@ locally controlled response loop:
 Brief cry detections arrive as repeated events
     ↓
 Aggregate event count and active time in a rolling window
+    ↓
+Apply a mild, reversible first response immediately in automatic mode
     ↓
 Confirm a cry episode conservatively
     ↓
@@ -86,12 +89,14 @@ as a detection event and tracks two signals inside a 30-second rolling window:
 - cumulative sensor-on time.
 
 The initial confirmation rule is two events or eight active seconds, with an
-eight-second confirmation debounce by default. After the first response, one
-fresh event or six fresh active seconds can authorize the next step once the
-20-second dwell has elapsed. A 60-second gap without a new event closes the
-episode. These defaults are evidence-based starting points, not a medical
-assessment, and should be validated against the actual nursery before
-automatic operation is enabled.
+eight-second confirmation debounce by default. In automatic mode at Baseline,
+the first event immediately applies Level 1 provisionally. Confirmation keeps
+it; otherwise the controller returns to Baseline after the 20-second dwell
+without notifying caregivers. After a confirmed response, one fresh event or
+six fresh active seconds can authorize the next step once the dwell has
+elapsed. A 60-second gap without a new event closes the episode. These defaults
+are evidence-based starting points, not a medical assessment, and should be
+validated against the actual nursery before automatic operation is enabled.
 
 The event interpretation matches the official [Home Assistant Reolink
 integration](https://www.home-assistant.io/integrations/reolink/) and its
@@ -121,8 +126,11 @@ there is no separate Acknowledge button.
 
 ### Automatic response
 
-Automatic operation authorizes upward changes only. Confirmation can advance
-one level, never skip levels. After every change the controller:
+Automatic operation authorizes upward changes only. At Baseline, the first
+event applies Level 1 immediately as a provisional response. Confirmation
+keeps Level 1; without confirmation it returns to Baseline after the dwell. At
+higher levels, confirmation can advance one level and never skip levels. After
+every confirmed response the controller:
 
 1. begins a 20-second dwell period;
 2. clears evidence consumed by that change;
@@ -232,6 +240,7 @@ The first level-based release includes:
 - Standby, Baseline, and four exact response levels;
 - one volume per active level plus a hard Maximum;
 - manual exact-level suggestions and optional automatic upward response;
+- immediate provisional Level 1 response from Baseline in automatic mode;
 - pulse-based evidence confirmation;
 - fresh evidence and dwell before every subsequent automatic increase;
 - gradual quiet step-down and fixed attention cutoff;
