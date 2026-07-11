@@ -7,18 +7,10 @@ from typing import TYPE_CHECKING
 from homeassistant.components.button import ButtonEntity, ButtonEntityDescription
 from homeassistant.const import EntityCategory
 
-from .const import (
-    SERVICE_ACKNOWLEDGE,
-    SERVICE_BASELINE,
-    SERVICE_BOOST,
-    SERVICE_SIMULATE_CRY_EVENT,
-    SERVICE_STOP,
-)
+from .const import SERVICE_SIMULATE_CRY_EVENT
 from .entity import NurserySootherEntity
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
-
     from homeassistant.config_entries import ConfigEntry
     from homeassistant.core import HomeAssistant
     from homeassistant.helpers.entity_platform import AddEntitiesCallback
@@ -26,19 +18,10 @@ if TYPE_CHECKING:
     from .controller import NurserySootherController
 
 
-BUTTONS = (
-    ButtonEntityDescription(key=SERVICE_BOOST, translation_key="boost"),
-    ButtonEntityDescription(key=SERVICE_BASELINE, translation_key="baseline"),
-    ButtonEntityDescription(
-        key=SERVICE_ACKNOWLEDGE,
-        translation_key="acknowledge",
-    ),
-    ButtonEntityDescription(key=SERVICE_STOP, translation_key="stop"),
-    ButtonEntityDescription(
-        key=SERVICE_SIMULATE_CRY_EVENT,
-        translation_key="simulate_cry_event",
-        entity_category=EntityCategory.CONFIG,
-    ),
+SIMULATE_DESCRIPTION = ButtonEntityDescription(
+    key=SERVICE_SIMULATE_CRY_EVENT,
+    translation_key="simulate_cry_event",
+    entity_category=EntityCategory.CONFIG,
 )
 
 
@@ -47,33 +30,23 @@ async def async_setup_entry(
     entry: ConfigEntry[NurserySootherController],
     async_add_entities: AddEntitiesCallback,
 ) -> None:
-    """Set up Nursery Soother action buttons."""
+    """Set up the finite diagnostic cry-event button."""
     del hass
-    async_add_entities(
-        NurserySootherActionButton(entry, description) for description in BUTTONS
-    )
+    async_add_entities([NurserySootherSimulateCryButton(entry)])
 
 
-class NurserySootherActionButton(NurserySootherEntity, ButtonEntity):
-    """Run one explicit parent action."""
+class NurserySootherSimulateCryButton(NurserySootherEntity, ButtonEntity):
+    """Inject one finite event through the normal cry-evidence path."""
 
-    entity_description: ButtonEntityDescription
+    entity_description = SIMULATE_DESCRIPTION
 
     def __init__(
         self,
         entry: ConfigEntry[NurserySootherController],
-        description: ButtonEntityDescription,
     ) -> None:
-        """Initialize an action button."""
-        super().__init__(entry, description)
+        """Initialize the diagnostic button."""
+        super().__init__(entry, SIMULATE_DESCRIPTION)
 
     async def async_press(self) -> None:
-        """Run the action represented by this button."""
-        actions: dict[str, Callable[[], Awaitable[object]]] = {
-            SERVICE_BOOST: self._controller.async_boost,
-            SERVICE_BASELINE: self._controller.async_baseline,
-            SERVICE_ACKNOWLEDGE: self._controller.async_acknowledge,
-            SERVICE_STOP: self._controller.async_stop,
-            SERVICE_SIMULATE_CRY_EVENT: (self._controller.async_simulate_cry_event),
-        }
-        await actions[self.entity_description.key]()
+        """Inject one synthetic cry event."""
+        await self._controller.async_simulate_cry_event()

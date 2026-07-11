@@ -13,7 +13,7 @@ from custom_components.nursery_soother.const import (
     CONF_CRY_SENSOR,
     CONF_MEDIA_PLAYER,
     CONF_NOTIFY_TARGETS,
-    CONF_WHITE_NOISE,
+    CONF_SOUNDS,
     DEFAULT_OPTIONS,
     DOMAIN,
     ENTRY_VERSION,
@@ -23,6 +23,7 @@ from custom_components.nursery_soother.controller import NurserySootherControlle
 from custom_components.nursery_soother.diagnostics import (
     async_get_config_entry_diagnostics,
 )
+from custom_components.nursery_soother.models import ACTIVE_LEVELS
 
 if TYPE_CHECKING:
     from homeassistant.core import HomeAssistant
@@ -31,15 +32,16 @@ if TYPE_CHECKING:
 async def test_diagnostics_redact_every_external_reference(
     hass: HomeAssistant,
 ) -> None:
-    """Diagnostics expose policy state but no entity, media, or parent details."""
+    """Diagnostics expose policy state but no entity, sound, or parent details."""
+    private_media = {
+        "media_content_id": "media-source://media_source/local/secret.mp3",
+        "media_content_type": "audio/mpeg",
+    }
     secrets = {
         CONF_CRY_SENSOR: "binary_sensor.private_nursery_cry",
         CONF_CAMERA: "camera.private_nursery",
         CONF_MEDIA_PLAYER: "media_player.private_nursery",
-        CONF_WHITE_NOISE: {
-            "media_content_id": "media-source://media_source/local/secret.mp3",
-            "media_content_type": "audio/mpeg",
-        },
+        CONF_SOUNDS: {level.value: dict(private_media) for level in ACTIVE_LEVELS},
         CONF_NOTIFY_TARGETS: [
             "notify.mobile_app_private_parent_one",
             "notify.mobile_app_private_parent_two",

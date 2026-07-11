@@ -11,7 +11,14 @@ from homeassistant.components.number import (
 )
 from homeassistant.const import PERCENTAGE, EntityCategory
 
-from .const import CONF_BASELINE_VOLUME, CONF_BOOST_VOLUME, CONF_MAX_VOLUME
+from .const import (
+    CONF_BASELINE_VOLUME,
+    CONF_LEVEL_1_VOLUME,
+    CONF_LEVEL_2_VOLUME,
+    CONF_LEVEL_3_VOLUME,
+    CONF_LEVEL_4_VOLUME,
+    CONF_MAX_VOLUME,
+)
 from .entity import NurserySootherEntity
 
 if TYPE_CHECKING:
@@ -22,37 +29,25 @@ if TYPE_CHECKING:
     from .controller import NurserySootherController
 
 
-VOLUME_NUMBERS = (
+VOLUME_NUMBERS = tuple(
     NumberEntityDescription(
-        key=CONF_BASELINE_VOLUME,
-        translation_key="baseline_volume",
+        key=key,
+        translation_key=key,
         entity_category=EntityCategory.CONFIG,
         mode=NumberMode.SLIDER,
         native_min_value=0,
         native_max_value=100,
         native_step=1,
         native_unit_of_measurement=PERCENTAGE,
-    ),
-    NumberEntityDescription(
-        key=CONF_BOOST_VOLUME,
-        translation_key="boost_volume",
-        entity_category=EntityCategory.CONFIG,
-        mode=NumberMode.SLIDER,
-        native_min_value=0,
-        native_max_value=100,
-        native_step=1,
-        native_unit_of_measurement=PERCENTAGE,
-    ),
-    NumberEntityDescription(
-        key=CONF_MAX_VOLUME,
-        translation_key="max_volume",
-        entity_category=EntityCategory.CONFIG,
-        mode=NumberMode.SLIDER,
-        native_min_value=0,
-        native_max_value=100,
-        native_step=1,
-        native_unit_of_measurement=PERCENTAGE,
-    ),
+    )
+    for key in (
+        CONF_BASELINE_VOLUME,
+        CONF_LEVEL_1_VOLUME,
+        CONF_LEVEL_2_VOLUME,
+        CONF_LEVEL_3_VOLUME,
+        CONF_LEVEL_4_VOLUME,
+        CONF_MAX_VOLUME,
+    )
 )
 
 
@@ -61,7 +56,7 @@ async def async_setup_entry(
     entry: ConfigEntry[NurserySootherController],
     async_add_entities: AddEntitiesCallback,
 ) -> None:
-    """Set up Nursery Soother volume controls."""
+    """Set up Nursery Soother level-volume controls."""
     del hass
     async_add_entities(
         NurserySootherVolumeNumber(entry, description) for description in VOLUME_NUMBERS
@@ -69,7 +64,7 @@ async def async_setup_entry(
 
 
 class NurserySootherVolumeNumber(NurserySootherEntity, NumberEntity):
-    """Configure one safe volume setting."""
+    """Configure one safe level or hard-cap volume."""
 
     entity_description: NumberEntityDescription
 

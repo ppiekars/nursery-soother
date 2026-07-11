@@ -21,8 +21,16 @@ cards:
     show_header_toggle: false
     state_color: true
     entities:
-      - entity: switch.nursery_soother_enabled
-        name: Enabled
+      - entity: select.nursery_soother_level
+        name: Soothing level
+      - entity: switch.nursery_soother_automatic_operation
+        name: Automatic operation
+      - entity: sensor.nursery_soother_state
+        name: State
+      - entity: sensor.nursery_soother_recommendation
+        name: Recommendation
+      - entity: binary_sensor.nursery_soother_attention_required
+        name: Attention required
       - entity: button.nursery_soother_simulate_cry_event
         name: Simulate cry event
         tap_action:
@@ -31,73 +39,21 @@ cards:
           target:
             entity_id: button.nursery_soother_simulate_cry_event
           confirmation:
-            text: Inject a test cry event and notify both parents?
-      - entity: sensor.nursery_soother_state
-        name: State
-      - entity: sensor.nursery_soother_recommendation
-        name: Recommendation
-      - entity: binary_sensor.nursery_soother_attention_required
-        name: Attention required
+            text: Inject one test cry event that can notify parents or change the automatic level?
 
   - type: entities
-    title: Safe volume limits
+    title: Level volumes and hard cap
     show_header_toggle: false
     entities:
       - entity: number.nursery_soother_baseline_volume
         name: Baseline
-      - entity: number.nursery_soother_boost_volume
-        name: Boost
+      - entity: number.nursery_soother_level_1_volume
+        name: Level 1
+      - entity: number.nursery_soother_level_2_volume
+        name: Level 2
+      - entity: number.nursery_soother_level_3_volume
+        name: Level 3
+      - entity: number.nursery_soother_level_4_volume
+        name: Level 4
       - entity: number.nursery_soother_maximum_volume
         name: Maximum
-
-  - type: grid
-    title: Parent controls
-    columns: 2
-    square: false
-    cards:
-      - type: button
-        entity: button.nursery_soother_boost
-        name: Boost
-        icon: mdi:volume-plus
-        show_state: false
-        tap_action:
-          action: perform-action
-          perform_action: button.press
-          target:
-            entity_id: button.nursery_soother_boost
-
-      - type: button
-        entity: button.nursery_soother_return_to_baseline
-        name: Baseline
-        icon: mdi:volume-medium
-        show_state: false
-        tap_action:
-          action: perform-action
-          perform_action: button.press
-          target:
-            entity_id: button.nursery_soother_return_to_baseline
-
-      - type: button
-        entity: button.nursery_soother_acknowledge
-        name: Acknowledge
-        icon: mdi:check-circle-outline
-        show_state: false
-        tap_action:
-          action: perform-action
-          perform_action: button.press
-          target:
-            entity_id: button.nursery_soother_acknowledge
-
-      - type: button
-        entity: button.nursery_soother_stop
-        name: Stop
-        icon: mdi:stop-circle-outline
-        color: red
-        show_state: false
-        tap_action:
-          action: perform-action
-          confirmation:
-            text: Stop white noise and disable Nursery Soother?
-          perform_action: button.press
-          target:
-            entity_id: button.nursery_soother_stop

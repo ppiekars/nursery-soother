@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from itertools import pairwise
 from typing import TYPE_CHECKING
 from unittest.mock import Mock
 
@@ -19,16 +20,28 @@ from custom_components.nursery_soother import (
 )
 from custom_components.nursery_soother import button as button_platform
 from custom_components.nursery_soother import number as number_platform
+from custom_components.nursery_soother import select as select_platform
 from custom_components.nursery_soother import sensor as sensor_platform
 from custom_components.nursery_soother import switch as switch_platform
 from custom_components.nursery_soother.const import (
+    CONF_AUTOMATIC_OPERATION,
     CONF_BASELINE_VOLUME,
-    CONF_BOOST_VOLUME,
+    CONF_LEVEL,
+    CONF_LEVEL_1_VOLUME,
+    CONF_LEVEL_2_VOLUME,
+    CONF_LEVEL_3_VOLUME,
+    CONF_LEVEL_4_VOLUME,
     CONF_MAX_VOLUME,
     DOMAIN,
     NAME,
+    SERVICE_SIMULATE_CRY_EVENT,
 )
-from custom_components.nursery_soother.models import Recommendation, SootherState
+from custom_components.nursery_soother.models import (
+    ACTIVE_LEVELS,
+    Recommendation,
+    SootherState,
+    SoothingLevel,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
@@ -37,12 +50,16 @@ if TYPE_CHECKING:
     from homeassistant.helpers.entity import Entity
 
 PERCENTAGE_MAX = 100
+ENTITY_COUNT = 12
 
 
 @dataclass
 class _FakeSettings:
-    baseline_volume: float = 20.0
-    boost_volume: float = 30.0
+    baseline_volume: float = 10.0
+    level_1_volume: float = 15.0
+    level_2_volume: float = 20.0
+    level_3_volume: float = 25.0
+    level_4_volume: float = 30.0
     max_volume: float = 40.0
 
 
@@ -50,10 +67,12 @@ class _FakeController:
     """Small observable implementation of the entity/controller contract."""
 
     def __init__(self) -> None:
-        self.state = SootherState.BASELINE
-        self.recommendation = Recommendation.OBSERVE
+        self.level = SoothingLevel.STANDBY
+        self.automatic = False
+        self.state = SootherState.STANDBY
+        self.recommendation = Recommendation.START
+        self.suggested_level: SoothingLevel | None = None
         self.attention_required = False
-        self.enabled = False
         self.settings = _FakeSettings()
         self.configured = True
         self.dependencies_available = True
@@ -74,31 +93,21 @@ class _FakeController:
         for listener in tuple(self.listeners):
             listener()
 
-    async def async_set_enabled(self, *, enabled: bool) -> None:
-        """Record and apply an enabled change."""
-        self.calls.append(("set_enabled", enabled))
-        self.enabled = enabled
+    async def async_set_level(self, level: SoothingLevel) -> None:
+        """Record and apply an exact output-level change."""
+        self.calls.append((CONF_LEVEL, level))
+        self.level = level
+        self.emit()
+
+    async def async_set_automatic(self, *, enabled: bool) -> None:
+        """Record and apply an operating-mode change."""
+        self.calls.append((CONF_AUTOMATIC_OPERATION, enabled))
+        self.automatic = enabled
         self.emit()
 
     async def async_simulate_cry_event(self) -> None:
         """Record one synthetic cry event."""
-        self.calls.append(("simulate_cry_event", None))
-
-    async def async_boost(self) -> None:
-        """Record a boost request."""
-        self.calls.append(("boost", None))
-
-    async def async_baseline(self) -> None:
-        """Record a baseline request."""
-        self.calls.append(("baseline", None))
-
-    async def async_acknowledge(self) -> None:
-        """Record an acknowledgement."""
-        self.calls.append(("acknowledge", None))
-
-    async def async_stop(self) -> None:
-        """Record a stop request."""
-        self.calls.append(("stop", None))
+        self.calls.append((SERVICE_SIMULATE_CRY_EVENT, None))
 
     async def async_set_volume(self, key: str, value: float) -> None:
         """Record and apply a volume setting."""
@@ -134,6 +143,7 @@ async def _all_entities(
     for setup_entry in (
         sensor_platform.async_setup_entry,
         binary_sensor_platform.async_setup_entry,
+        select_platform.async_setup_entry,
         switch_platform.async_setup_entry,
         number_platform.async_setup_entry,
         button_platform.async_setup_entry,
@@ -148,28 +158,27 @@ async def test_shared_metadata_availability_and_listener_lifecycle(
     entry: MockConfigEntry,
     controller: _FakeController,
 ) -> None:
-    """Entities share stable metadata and unsubscribe from controller changes."""
+    """The twelve entities share stable metadata and observable updates."""
     entities = await _all_entities(hass, entry)
 
-    expected_unique_ids = {
-        f"{entry.entry_id}_{key}"
-        for key in {
-            "state",
-            "recommendation",
-            "attention_required",
-            "enabled",
-            "simulate_cry_event",
-            CONF_BASELINE_VOLUME,
-            CONF_BOOST_VOLUME,
-            CONF_MAX_VOLUME,
-            "boost",
-            "baseline",
-            "acknowledge",
-            "stop",
-        }
+    expected_keys = {
+        "state",
+        "recommendation",
+        "attention_required",
+        CONF_LEVEL,
+        CONF_AUTOMATIC_OPERATION,
+        SERVICE_SIMULATE_CRY_EVENT,
+        CONF_BASELINE_VOLUME,
+        CONF_LEVEL_1_VOLUME,
+        CONF_LEVEL_2_VOLUME,
+        CONF_LEVEL_3_VOLUME,
+        CONF_LEVEL_4_VOLUME,
+        CONF_MAX_VOLUME,
     }
-    assert len(entities) == len(expected_unique_ids)
-    assert {entity.unique_id for entity in entities} == expected_unique_ids
+    assert len(entities) == ENTITY_COUNT
+    assert {entity.unique_id for entity in entities} == {
+        f"{entry.entry_id}_{key}" for key in expected_keys
+    }
     for entity in entities:
         assert entity.should_poll is False
         assert entity.has_entity_name is True
@@ -182,8 +191,6 @@ async def test_shared_metadata_availability_and_listener_lifecycle(
             "name": NAME,
         }
 
-    # Controller entities remain usable during an outage so parents can see
-    # the fail-safe state, acknowledge it, or stop the integration.
     controller.dependencies_available = False
     controller.configured = False
     assert all(entity.available for entity in entities)
@@ -194,105 +201,124 @@ async def test_shared_metadata_availability_and_listener_lifecycle(
     entity.hass = hass
     entity.entity_id = "sensor.listener_test"
     await entity.async_added_to_hass()
-    assert len(controller.listeners) == 1
-
     controller.emit()
     write_state.assert_called_once_with()
-
     await entity.async_remove(force_remove=True)
     assert controller.listeners == []
 
 
-async def test_enum_sensors(
+async def test_level_select_delegates_exact_enum(
     hass: HomeAssistant,
     entry: MockConfigEntry,
     controller: _FakeController,
 ) -> None:
-    """State and recommendation sensors expose complete enum metadata."""
-    entities: list[sensor_platform.NurserySootherSensor] = []
-    await sensor_platform.async_setup_entry(hass, entry, entities.extend)
-    by_key = {entity.entity_description.key: entity for entity in entities}
+    """The primary control exposes Standby and every ordered active level."""
+    entities: list[select_platform.NurserySootherLevelSelect] = []
+    await select_platform.async_setup_entry(hass, entry, entities.extend)
+    entity = entities[0]
 
-    assert by_key["state"].native_value == SootherState.BASELINE.value
+    assert entity.options == [level.value for level in SoothingLevel]
+    assert entity.current_option == SoothingLevel.STANDBY.value
+    assert entity.entity_category is None
+    assert entity.entity_description.translation_key == "level"
+
+    await entity.async_select_option(SoothingLevel.LEVEL_3.value)
+    assert entity.current_option == SoothingLevel.LEVEL_3.value
+    assert controller.calls == [(CONF_LEVEL, SoothingLevel.LEVEL_3)]
+
+
+def test_level_helpers_do_not_skip_or_cross_active_bounds() -> None:
+    """Automatic traversal moves exactly one active level at a time."""
+    assert SoothingLevel.STANDBY.next_active() is SoothingLevel.BASELINE
+    assert SoothingLevel.STANDBY.previous_active() is None
+    assert SoothingLevel.BASELINE.previous_active() is None
+    assert SoothingLevel.LEVEL_4.next_active() is None
+    for lower, upper in pairwise(ACTIVE_LEVELS):
+        assert lower.next_active() is upper
+        assert upper.previous_active() is lower
+
+
+async def test_automatic_switch_delegates_to_controller(
+    hass: HomeAssistant,
+    entry: MockConfigEntry,
+    controller: _FakeController,
+) -> None:
+    """Automatic operation is a primary mode control, not an enable switch."""
+    entities: list[switch_platform.NurserySootherAutomaticSwitch] = []
+    await switch_platform.async_setup_entry(hass, entry, entities.extend)
+    automatic = entities[0]
+
+    assert automatic.entity_description.translation_key == "automatic_operation"
+    assert automatic.entity_category is None
+    assert automatic.is_on is False
+    await automatic.async_turn_on()
+    await automatic.async_turn_off()
+    assert controller.calls == [
+        (CONF_AUTOMATIC_OPERATION, True),
+        (CONF_AUTOMATIC_OPERATION, False),
+    ]
+
+
+async def test_enum_sensors_and_attention_binary_sensor(
+    hass: HomeAssistant,
+    entry: MockConfigEntry,
+    controller: _FakeController,
+) -> None:
+    """Policy status remains separate from output level and attention."""
+    sensors: list[sensor_platform.NurserySootherSensor] = []
+    await sensor_platform.async_setup_entry(hass, entry, sensors.extend)
+    by_key = {entity.entity_description.key: entity for entity in sensors}
+    attention: list[
+        binary_sensor_platform.NurserySootherAttentionRequiredBinarySensor
+    ] = []
+    await binary_sensor_platform.async_setup_entry(hass, entry, attention.extend)
+
+    assert by_key["state"].native_value == SootherState.STANDBY.value
     assert by_key["state"].device_class is SensorDeviceClass.ENUM
     assert by_key["state"].options == [state.value for state in SootherState]
-    assert by_key["state"].entity_description.translation_key == "state"
-
-    assert by_key["recommendation"].native_value == Recommendation.OBSERVE.value
-    assert by_key["recommendation"].device_class is SensorDeviceClass.ENUM
+    assert by_key["recommendation"].native_value == Recommendation.START.value
     assert by_key["recommendation"].options == [
         recommendation.value for recommendation in Recommendation
     ]
-    assert (
-        by_key["recommendation"].entity_description.translation_key == "recommendation"
-    )
+    assert attention[0].device_class is BinarySensorDeviceClass.PROBLEM
+    assert attention[0].is_on is False
+    assert by_key["recommendation"].extra_state_attributes == {"suggested_level": None}
 
     controller.state = SootherState.ATTENTION_REQUIRED
-    controller.recommendation = Recommendation.ATTEND
-    assert by_key["state"].native_value == SootherState.ATTENTION_REQUIRED.value
-    assert by_key["recommendation"].native_value == Recommendation.ATTEND.value
-
-
-async def test_attention_required_binary_sensor(
-    hass: HomeAssistant,
-    entry: MockConfigEntry,
-    controller: _FakeController,
-) -> None:
-    """Attention-required state is exposed as a problem binary sensor."""
-    entities: list[
-        binary_sensor_platform.NurserySootherAttentionRequiredBinarySensor
-    ] = []
-    await binary_sensor_platform.async_setup_entry(hass, entry, entities.extend)
-    entity = entities[0]
-
-    assert entity.entity_description.translation_key == "attention_required"
-    assert entity.device_class is BinarySensorDeviceClass.PROBLEM
-    assert entity.is_on is False
-
+    controller.recommendation = Recommendation.INCREASE_LEVEL
+    controller.suggested_level = SoothingLevel.LEVEL_1
     controller.attention_required = True
-    assert entity.is_on is True
+    assert by_key["state"].native_value == SootherState.ATTENTION_REQUIRED.value
+    assert by_key["recommendation"].native_value == Recommendation.INCREASE_LEVEL.value
+    assert by_key["recommendation"].extra_state_attributes == {
+        "suggested_level": SoothingLevel.LEVEL_1.value
+    }
+    assert attention[0].is_on is True
+
+    controller.recommendation = Recommendation.ATTEND
+    assert by_key["recommendation"].extra_state_attributes == {"suggested_level": None}
 
 
-async def test_enabled_switch_delegates_to_controller(
+async def test_six_volume_numbers_delegate_safe_settings(
     hass: HomeAssistant,
     entry: MockConfigEntry,
     controller: _FakeController,
 ) -> None:
-    """The configuration switch delegates enable and disable operations."""
-    entities: list[switch_platform.NurserySootherEnabledSwitch] = []
-    await switch_platform.async_setup_entry(hass, entry, entities.extend)
-    enabled = entities[0]
-
-    assert enabled.entity_description.translation_key == "enabled"
-    assert enabled.entity_category is EntityCategory.CONFIG
-    assert enabled.is_on is False
-
-    await enabled.async_turn_on()
-    assert enabled.is_on is True
-    await enabled.async_turn_off()
-    assert enabled.is_on is False
-    assert controller.calls == [
-        ("set_enabled", True),
-        ("set_enabled", False),
-    ]
-
-
-async def test_volume_numbers_delegate_safe_settings(
-    hass: HomeAssistant,
-    entry: MockConfigEntry,
-    controller: _FakeController,
-) -> None:
-    """Volume numbers use percentages and delegate validation to the controller."""
+    """Every active level and the hard cap has one configuration number."""
     entities: list[number_platform.NurserySootherVolumeNumber] = []
     await number_platform.async_setup_entry(hass, entry, entities.extend)
     by_key = {entity.entity_description.key: entity for entity in entities}
 
     expected = {
-        CONF_BASELINE_VOLUME: (20.0, 21.0, "baseline_volume"),
-        CONF_BOOST_VOLUME: (30.0, 31.0, "boost_volume"),
-        CONF_MAX_VOLUME: (40.0, 41.0, "max_volume"),
+        CONF_BASELINE_VOLUME: 10.0,
+        CONF_LEVEL_1_VOLUME: 15.0,
+        CONF_LEVEL_2_VOLUME: 20.0,
+        CONF_LEVEL_3_VOLUME: 25.0,
+        CONF_LEVEL_4_VOLUME: 30.0,
+        CONF_MAX_VOLUME: 40.0,
     }
-    for key, (initial, updated, translation_key) in expected.items():
+    assert set(by_key) == set(expected)
+    for key, initial in expected.items():
         entity = by_key[key]
         assert entity.native_value == initial
         assert entity.native_min_value == 0
@@ -301,43 +327,25 @@ async def test_volume_numbers_delegate_safe_settings(
         assert entity.native_unit_of_measurement == PERCENTAGE
         assert entity.mode is NumberMode.SLIDER
         assert entity.entity_category is EntityCategory.CONFIG
-        assert entity.entity_description.translation_key == translation_key
+        assert entity.entity_description.translation_key == key
 
-        await entity.async_set_native_value(updated)
-        assert entity.native_value == updated
+        await entity.async_set_native_value(initial + 1)
+        assert entity.native_value == initial + 1
 
-    assert controller.calls == [
-        (CONF_BASELINE_VOLUME, 21.0),
-        (CONF_BOOST_VOLUME, 31.0),
-        (CONF_MAX_VOLUME, 41.0),
-    ]
+    assert controller.calls == [(key, value + 1) for key, value in expected.items()]
 
 
-async def test_action_buttons_delegate_to_controller(
+async def test_simulator_is_the_only_button(
     hass: HomeAssistant,
     entry: MockConfigEntry,
     controller: _FakeController,
 ) -> None:
-    """Each action button invokes exactly one controller command."""
-    entities: list[button_platform.NurserySootherActionButton] = []
+    """Legacy Boost, Baseline, Stop, and Acknowledge controls are absent."""
+    entities: list[button_platform.NurserySootherSimulateCryButton] = []
     await button_platform.async_setup_entry(hass, entry, entities.extend)
 
-    for entity in entities:
-        assert (
-            entity.entity_description.translation_key == entity.entity_description.key
-        )
-        expected_category = (
-            EntityCategory.CONFIG
-            if entity.entity_description.key == "simulate_cry_event"
-            else None
-        )
-        assert entity.entity_category is expected_category
-        await entity.async_press()
-
-    assert controller.calls == [
-        ("boost", None),
-        ("baseline", None),
-        ("acknowledge", None),
-        ("stop", None),
-        ("simulate_cry_event", None),
-    ]
+    assert len(entities) == 1
+    assert entities[0].entity_description.key == SERVICE_SIMULATE_CRY_EVENT
+    assert entities[0].entity_category is EntityCategory.CONFIG
+    await entities[0].async_press()
+    assert controller.calls == [(SERVICE_SIMULATE_CRY_EVENT, None)]

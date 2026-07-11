@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from homeassistant.components.sensor import (
     SensorDeviceClass,
@@ -68,3 +68,18 @@ class NurserySootherSensor(NurserySootherEntity, SensorEntity):
         if self.entity_description.key == "state":
             return self._controller.state.value
         return self._controller.recommendation.value
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any] | None:
+        """Expose the exact next level only while an increase is recommended."""
+        if self.entity_description.key != "recommendation":
+            return None
+        suggested_level = self._controller.suggested_level
+        return {
+            "suggested_level": (
+                suggested_level.value
+                if self._controller.recommendation is Recommendation.INCREASE_LEVEL
+                and suggested_level is not None
+                else None
+            )
+        }

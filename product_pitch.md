@@ -1,144 +1,207 @@
-## Pitch
+# Product pitch
 
-**Nursery Soother** is a Home Assistant integration that turns an existing smart camera and speaker into a privacy-friendly, SNOO-inspired nursery assistant.
+**Nursery Soother** is a Home Assistant integration that turns an existing
+cry-aware camera and speaker into a privacy-friendly, SNOO-inspired nursery
+assistant with explicit, understandable response levels.
 
-It uses a camera’s baby-cry detection as an input, plays continuous white noise through a smart speaker, and helps parents respond through controlled volume changes, actionable phone notifications, a shared dashboard, and Siri commands.
-
-Rather than trying to replace a baby monitor or fully automate care, the integration provides a safe, configurable response loop:
+This design supersedes the earlier one-boost product pitch. The parent-facing
+control is now one ordered level:
 
 ```text
-Cry detected
-    ↓
-Evaluate timing and current nursery state
-    ↓
-Suggest or apply a small, capped white-noise increase
-    ↓
-Notify both parents with camera and response controls
-    ↓
-Return to baseline after a quiet period
-    ↓
-Stop escalating and request attention if crying continues
+Standby → Baseline → Level 1 → Level 2 → Level 3 → Level 4
 ```
 
-## What the integration does
+A parent can select any level exactly. An optional Automatic operation switch
+allows confirmed, continuing cry events to move upward one level at a time.
+With automatic operation disabled, Nursery Soother explains why crying was
+inferred and suggests the exact next level without changing it.
 
-The integration coordinates existing Home Assistant entities instead of directly implementing support for specific devices.
+## Product promise
 
-It consumes:
+Nursery Soother combines devices many parents already own into one coherent,
+locally controlled response loop:
 
-* a cry-detection binary sensor, such as Reolink E1 Zoom;
-* a camera entity for snapshots or live video;
-* a media player, such as Sonos Era 100 SL;
-* Home Assistant mobile notification targets for both parents.
+```text
+Brief cry detections arrive as repeated events
+    ↓
+Aggregate event count and active time in a rolling window
+    ↓
+Confirm a cry episode conservatively
+    ↓
+Suggest or apply exactly one higher soothing level
+    ↓
+Require fresh evidence before any later increase
+    ↓
+Step down gradually after quiet
+    ↓
+Stop playback and request direct attention at a fixed safety deadline
+```
+
+It does not attempt to diagnose distress, replace a baby monitor, or automate
+care. The integration helps caregivers understand and respond to device
+signals while preserving explicit limits and direct oversight.
+
+## Six exact levels
+
+| Level | Meaning |
+| --- | --- |
+| **Standby** | Off: no integration-owned playback and no automatic response |
+| **Baseline** | Normal continuous soothing sound |
+| **Level 1** | First response step |
+| **Level 2** | Second response step |
+| **Level 3** | Third response step |
+| **Level 4** | Highest allowed policy step |
+
+Baseline and Levels 1–4 each have an independently configured volume. Every
+command is additionally capped by Maximum volume. Volumes must be monotonic,
+so the UI and controller enforce:
+
+```text
+Baseline <= Level 1 <= Level 2 <= Level 3
+         <= Level 4 <= Maximum
+```
+
+The output model also maps a soothing sound to every active level. The initial
+release keeps setup simple by mapping the same selected MP3 to Baseline and all
+four response levels. Later per-level sound choices can use the same policy
+without redesigning the controller.
+
+Standby is a hard off boundary. Physical cry events are ignored, the artificial
+cry-event button is a no-op, and Automatic operation cannot start a soothing
+session. A caregiver must select Baseline or another active level first.
+
+## Evidence, not a held cry state
+
+The camera communicates detections as short alarm events even though Home
+Assistant exposes them through an on/off binary sensor. Aggregate recorder
+history for the configured Reolink sensor contained **1,605 pulses over 10
+days**. Median on-time was **3.29 seconds**, p90 was **8.12 seconds**, and only
+**0.69%** remained on for 15 seconds. The median gap was about 19 seconds.
+
+That pattern makes a traditional “sensor must remain on for 15 seconds”
+debounce unsuitable. Nursery Soother instead treats every off-to-on transition
+as a detection event and tracks two signals inside a 30-second rolling window:
+
+- number of cry events;
+- cumulative sensor-on time.
+
+The initial confirmation rule is three events or ten active seconds, with a
+ten-second confirmation debounce by default. A 60-second gap without a new
+event closes the episode. These defaults are evidence-based starting points,
+not a medical assessment, and should be validated against the actual nursery
+before automatic operation is enabled.
+
+The event interpretation matches the official [Home Assistant Reolink
+integration](https://www.home-assistant.io/integrations/reolink/) and its
+[upstream push-event
+implementation](https://github.com/starkillerOG/reolink_aio/blob/main/reolink_aio/baichuan/baichuan.py#L691-L742).
+
+## Two operating styles
+
+### Manual response
+
+Automatic operation is off by default. For each qualified evidence decision,
+all configured caregivers receive one shared, tagged notification with:
+
+- the evidence that triggered confirmation;
+- current soothing level;
+- an exact next-level suggestion;
+- camera access and a safe Standby option when attention is needed.
+
+Only the current tagged notification remains visible. After the dwell period,
+fresh qualifying evidence may replace it with a newer suggestion during the
+same episode.
+
+Ignoring the suggestion changes nothing. Selecting the proposed level from a
+phone, dashboard, automation, HomeKit, or Siri calls the same guarded
+exact-level command. The selection itself is the caregiver's shared decision;
+there is no separate Acknowledge button.
+
+### Automatic response
+
+Automatic operation authorizes upward changes only. Confirmation can advance
+one level, never skip levels. After every change the controller:
+
+1. begins a 30-second dwell period;
+2. clears evidence consumed by that change;
+3. accepts only fresh post-change events for the next decision;
+4. advances at most one more level when fresh evidence qualifies.
+
+It cannot go beyond Level 4, bypass Maximum volume, reuse old events to race
+through the levels, or act while a dependency or playback-ownership check is
+unsafe.
+
+Both modes step down one level after each uninterrupted 120-second quiet
+interval until Baseline. A confirmed episode also starts one fixed 150-second
+caregiver deadline. If it is still unresolved at expiry, Nursery Soother enters
+Standby, stops its own sound, and requests direct attention regardless of mode
+or level. A 60-second no-event gap closes the episode and cancels that
+attention deadline.
+
+## What the integration coordinates
+
+Nursery Soother consumes standard Home Assistant capabilities:
+
+- a cry-detection `binary_sensor`, such as a Reolink camera's baby-cry sensor;
+- a `camera` entity for caregiver context;
+- a `media_player`, such as Sonos;
+- one local Media browser sound, currently reused for every active level;
+- one or more Companion app `notify.mobile_app_*` actions.
 
 It provides:
 
-* continuous local white-noise playback;
-* configurable baseline and boosted volume levels;
-* a hard maximum-volume limit;
-* two operating modes:
+- one exact level select containing Standby, Baseline, and Levels 1–4;
+- an Automatic operation switch;
+- six safe volume controls: five levels plus Maximum;
+- a policy-state sensor and recommendation sensor;
+- a caregiver-attention binary sensor;
+- an artificial cry-event button for controlled testing;
+- episode-scoped, synchronized notifications;
+- gradual quiet downshift and a fixed attention cutoff;
+- speaker playback ownership checks and restart-safe recovery;
+- diagnostics with sensitive identifiers redacted.
 
-  * **Suggestions:** ask a parent before changing anything;
-  * **Assisted:** perform one or two conservative volume increases automatically;
-* cry debounce, cooldown, and inferred settling timers;
-* actionable notifications with options such as Boost, Baseline, Acknowledge, Stop, and Open Camera;
-* synchronized state and acknowledgement across both parents’ phones;
-* a nursery dashboard showing the camera, current mode, volume, recent events, and controls;
-* Home Assistant actions and scripts that can be called through Siri and Apple Shortcuts;
-* recovery after Home Assistant restarts and alerts when the camera or speaker becomes unavailable.
-
-The integration should remain device-agnostic. Reolink and Sonos are the initial target setup, but any compatible `binary_sensor`, `camera`, and `media_player` could be selected during configuration.
-
-## Core design
-
-The integration is primarily a state machine:
-
-```text
-Disabled
-Baseline
-Cry Pending
-Boost 1
-Boost 2
-Attention Required
-Settling
-```
-
-It owns the response policy, timers, safety limits, and parent coordination.
-
-Home Assistant’s official integrations continue to own:
-
-* camera connectivity;
-* cry-detection entities;
-* speaker playback;
-* mobile notifications;
-* HomeKit and Siri connectivity.
-
-This avoids duplicating Reolink, Sonos, or Apple integrations and keeps the project maintainable.
+Reolink, Sonos, Apple, and other integrations continue to own connectivity.
+Nursery Soother owns only the policy, timers, level decisions, and guarded Home
+Assistant actions.
 
 ## Home Assistant experience
 
-After installation, a user would add **Nursery Soother** from the Integrations page and complete a guided setup flow:
+After installation, a user adds **Nursery Soother** from the Integrations page:
 
-1. Select the cry sensor.
-2. Select the nursery camera.
-3. Select the speaker.
-4. Choose a local white-noise media source.
-5. Select parent notification targets.
-6. Configure baseline, boost, and maximum volume levels.
-7. Choose Suggestions or Assisted mode.
-8. Configure debounce, settling, and escalation timing.
+1. select the cry sensor;
+2. select the nursery camera;
+3. select the speaker;
+4. choose a soothing sound from **Local media** in the Media browser;
+5. select parent notification targets;
+6. review Baseline, Level 1–4, and Maximum volumes;
+7. review evidence, dwell, quiet, and attention timings;
+8. leave Standby only after testing the actual speaker;
+9. enable Automatic operation only after validating manual suggestions.
 
-The integration would then create standard Home Assistant entities such as:
+The integration creates standard entities similar to:
 
 ```text
-switch.nursery_soother
-select.nursery_response_mode
-sensor.nursery_state
-sensor.nursery_recommendation
-binary_sensor.nursery_attention_required
-number.nursery_baseline_volume
-number.nursery_boost_volume
-number.nursery_max_volume
-button.nursery_boost
-button.nursery_baseline
-button.nursery_acknowledge
+select.nursery_soother_level
+switch.nursery_soother_automatic_operation
+sensor.nursery_soother_state
+sensor.nursery_soother_recommendation
+binary_sensor.nursery_soother_attention_required
+number.nursery_soother_baseline_volume
+number.nursery_soother_level_1_volume
+number.nursery_soother_level_2_volume
+number.nursery_soother_level_3_volume
+number.nursery_soother_level_4_volume
+number.nursery_soother_maximum_volume
+button.nursery_soother_simulate_cry_event
 ```
 
-Using standard entities makes the integration work immediately with native dashboards, automations, voice assistants, HomeKit Bridge, and Apple Shortcuts.
-
-An optional custom dashboard card could later provide a more polished, mobile-first nursery interface.
+These entities work with native dashboards, automations, HomeKit Bridge, Apple
+Shortcuts, and Siri without a custom frontend card.
 
 ## Deployment through HACS
 
-The project would be built as a standard Home Assistant custom integration and distributed through HACS.
-
-Repository structure:
-
-```text
-nursery-soother/
-├── custom_components/
-│   └── nursery_soother/
-│       ├── __init__.py
-│       ├── manifest.json
-│       ├── config_flow.py
-│       ├── controller.py
-│       ├── sensor.py
-│       ├── binary_sensor.py
-│       ├── switch.py
-│       ├── select.py
-│       ├── number.py
-│       ├── button.py
-│       ├── services.yaml
-│       ├── diagnostics.py
-│       └── translations/
-│           └── en.json
-├── hacs.json
-├── README.md
-├── LICENSE
-└── tests/
-```
-
-Deployment flow:
+The project is distributed as a standard Home Assistant custom integration:
 
 ```text
 GitHub repository
@@ -154,43 +217,47 @@ User adds Nursery Soother through the UI
 Future versions are delivered through HACS updates
 ```
 
-The initial release can be installed as a custom HACS repository. Once mature, documented, and widely tested, it could be submitted for inclusion in HACS’s default repository list.
+Once mature, documented, and broadly tested, the repository can be submitted
+for inclusion in HACS's default list.
 
-## Suggested MVP
+## Initial product scope
 
-The first version should focus on the smallest reliable product:
+The first level-based release includes:
 
-* one nursery per configuration entry;
-* generic cry sensor, camera, and media-player selection;
-* baseline white noise;
-* Suggestions mode;
-* one temporary boost level;
-* hard volume cap;
-* actionable notifications;
-* acknowledgement from either parent;
-* automatic return to baseline;
-* standard Home Assistant entities;
-* a one-shot diagnostic button that simulates a cry event;
-* diagnostics and unit-tested state transitions.
+- one nursery per configuration entry;
+- generic cry sensor, camera, media-player, media, and notification selection;
+- Standby, Baseline, and four exact response levels;
+- one volume per active level plus a hard Maximum;
+- manual exact-level suggestions and optional automatic upward response;
+- pulse-based evidence confirmation;
+- fresh evidence and dwell before every subsequent automatic increase;
+- gradual quiet step-down and fixed attention cutoff;
+- episode-scoped notifications without Acknowledge;
+- one artificial cry-event button;
+- standard Home Assistant entities, diagnostics, and tested state transitions.
 
-Later releases could add:
+Later releases can add:
 
-* a second boost stage;
-* Assisted mode;
-* custom dashboard card;
-* event history and response analytics;
-* multiple detection inputs;
-* Frigate audio-event support;
-* bedtime schedules;
-* richer notification previews;
-* Home Assistant Repairs warnings for invalid or unavailable devices.
+- a distinct sound selector for each active level;
+- schedules or bedtime windows;
+- multiple detection inputs and Frigate audio events;
+- long-term response analytics and evidence tuning tools;
+- richer notification previews;
+- a purpose-built mobile dashboard card.
+
+Backward compatibility with the earlier development-only Boost/Baseline model
+is not a product requirement. A clean removal and reintegration is preferable
+to preserving ambiguous controls or unsafe historical state.
 
 ## Positioning
 
-The project is not a SNOO replacement and does not attempt to automate physical soothing. Its value is in combining devices many parents already own into one coherent, locally controlled workflow.
+Nursery Soother is not a SNOO replacement and does not automate physical
+soothing. Its value is a transparent control plane for devices parents already
+own:
 
-The core proposition is:
+> **A reusable Home Assistant integration that turns cry-event evidence into
+> exact, capped soothing levels, caregiver suggestions, and optionally
+> conservative one-step automatic responses.**
 
-> **A reusable Home Assistant integration that connects cry detection, white noise, parent notifications, and voice control into a conservative, configurable nursery response system.**
-
-It provides the convenience of a dedicated smart-nursery product while retaining local control, device choice, transparent automation rules, and clear parent oversight.
+It offers dedicated-product convenience while retaining local control, device
+choice, visible rules, a hard volume ceiling, and direct caregiver authority.

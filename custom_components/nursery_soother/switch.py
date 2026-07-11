@@ -5,8 +5,8 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from homeassistant.components.switch import SwitchEntity, SwitchEntityDescription
-from homeassistant.const import EntityCategory
 
+from .const import CONF_AUTOMATIC_OPERATION
 from .entity import NurserySootherEntity
 
 if TYPE_CHECKING:
@@ -17,10 +17,9 @@ if TYPE_CHECKING:
     from .controller import NurserySootherController
 
 
-ENABLED_DESCRIPTION = SwitchEntityDescription(
-    key="enabled",
-    translation_key="enabled",
-    entity_category=EntityCategory.CONFIG,
+AUTOMATIC_DESCRIPTION = SwitchEntityDescription(
+    key=CONF_AUTOMATIC_OPERATION,
+    translation_key="automatic_operation",
 )
 
 
@@ -29,34 +28,34 @@ async def async_setup_entry(
     entry: ConfigEntry[NurserySootherController],
     async_add_entities: AddEntitiesCallback,
 ) -> None:
-    """Set up the Nursery Soother enabled switch."""
+    """Set up the Nursery Soother automatic-operation control."""
     del hass
-    async_add_entities([NurserySootherEnabledSwitch(entry)])
+    async_add_entities([NurserySootherAutomaticSwitch(entry)])
 
 
-class NurserySootherEnabledSwitch(NurserySootherEntity, SwitchEntity):
-    """Enable or disable the response controller."""
+class NurserySootherAutomaticSwitch(NurserySootherEntity, SwitchEntity):
+    """Choose automatic level changes instead of manual suggestions."""
 
-    entity_description = ENABLED_DESCRIPTION
+    entity_description = AUTOMATIC_DESCRIPTION
 
     def __init__(
         self,
         entry: ConfigEntry[NurserySootherController],
     ) -> None:
-        """Initialize the enabled switch."""
-        super().__init__(entry, ENABLED_DESCRIPTION)
+        """Initialize the automatic-operation switch."""
+        super().__init__(entry, AUTOMATIC_DESCRIPTION)
 
     @property
     def is_on(self) -> bool:
-        """Return whether the controller is enabled."""
-        return self._controller.enabled
+        """Return whether automatic level changes are authorized."""
+        return self._controller.automatic
 
     async def async_turn_on(self, **kwargs: object) -> None:
-        """Enable the controller."""
+        """Enable automatic operation."""
         del kwargs
-        await self._controller.async_set_enabled(enabled=True)
+        await self._controller.async_set_automatic(enabled=True)
 
     async def async_turn_off(self, **kwargs: object) -> None:
-        """Disable the controller."""
+        """Use manual suggestions without automatic level changes."""
         del kwargs
-        await self._controller.async_set_enabled(enabled=False)
+        await self._controller.async_set_automatic(enabled=False)

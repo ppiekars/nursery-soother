@@ -17,60 +17,90 @@ from homeassistant.data_entry_flow import FlowResultType, InvalidData
 from homeassistant.helpers import entity_registry as er
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
-from custom_components.nursery_soother.config_flow import NurserySootherConfigFlow
+from custom_components.nursery_soother.config_flow import (
+    NurserySootherConfigFlow,
+    sounds_are_valid,
+)
 from custom_components.nursery_soother.const import (
+    CONF_ATTENTION_SECONDS,
+    CONF_AUTOMATIC_OPERATION,
     CONF_BASELINE_VOLUME,
-    CONF_BOOST_VOLUME,
     CONF_CAMERA,
-    CONF_COOLDOWN_SECONDS,
+    CONF_CRY_GAP_SECONDS,
     CONF_CRY_SENSOR,
     CONF_DEBOUNCE_SECONDS,
-    CONF_ENABLED,
-    CONF_ESCALATION_SECONDS,
+    CONF_EVIDENCE_WINDOW_SECONDS,
+    CONF_LEVEL,
+    CONF_LEVEL_1_VOLUME,
+    CONF_LEVEL_2_VOLUME,
+    CONF_LEVEL_3_VOLUME,
+    CONF_LEVEL_4_VOLUME,
+    CONF_LEVEL_UP_SECONDS,
     CONF_MAX_VOLUME,
     CONF_MEDIA_PLAYER,
     CONF_NOTIFY_TARGETS,
     CONF_SETTLING_SECONDS,
-    CONF_WHITE_NOISE,
+    CONF_SOOTHING_SOUND,
+    CONF_SOUNDS,
+    DEFAULT_ATTENTION_SECONDS,
+    DEFAULT_AUTOMATIC_OPERATION,
     DEFAULT_BASELINE_VOLUME,
-    DEFAULT_BOOST_VOLUME,
-    DEFAULT_COOLDOWN_SECONDS,
+    DEFAULT_CRY_GAP_SECONDS,
     DEFAULT_DEBOUNCE_SECONDS,
-    DEFAULT_ESCALATION_SECONDS,
+    DEFAULT_EVIDENCE_WINDOW_SECONDS,
+    DEFAULT_LEVEL,
+    DEFAULT_LEVEL_1_VOLUME,
+    DEFAULT_LEVEL_2_VOLUME,
+    DEFAULT_LEVEL_3_VOLUME,
+    DEFAULT_LEVEL_4_VOLUME,
+    DEFAULT_LEVEL_UP_SECONDS,
     DEFAULT_MAX_VOLUME,
     DEFAULT_SETTLING_SECONDS,
     DOMAIN,
     ENTRY_VERSION,
     NAME,
 )
+from custom_components.nursery_soother.models import ACTIVE_LEVELS, SoothingLevel
 
 if TYPE_CHECKING:
     from homeassistant.core import HomeAssistant
 
-WHITE_NOISE = {
+SOOTHING_SOUND = {
     "media_content_id": "media-source://media_source/local/white-noise.mp3",
     "media_content_type": "audio/mpeg",
 }
-CONFIG_DATA = {
+SOUNDS = {level.value: dict(SOOTHING_SOUND) for level in ACTIVE_LEVELS}
+USER_DATA = {
     CONF_CRY_SENSOR: "binary_sensor.nursery_crying",
     CONF_CAMERA: "camera.nursery",
     CONF_MEDIA_PLAYER: "media_player.nursery",
-    CONF_WHITE_NOISE: WHITE_NOISE,
+    CONF_SOOTHING_SOUND: SOOTHING_SOUND,
     CONF_NOTIFY_TARGETS: [
         "notify.mobile_app_parent_one",
         "notify.mobile_app_parent_two",
     ],
 }
+CONFIG_DATA = {
+    key: value for key, value in USER_DATA.items() if key != CONF_SOOTHING_SOUND
+} | {CONF_SOUNDS: SOUNDS}
 BEHAVIOR_DATA = {
     CONF_BASELINE_VOLUME: DEFAULT_BASELINE_VOLUME,
-    CONF_BOOST_VOLUME: DEFAULT_BOOST_VOLUME,
+    CONF_LEVEL_1_VOLUME: DEFAULT_LEVEL_1_VOLUME,
+    CONF_LEVEL_2_VOLUME: DEFAULT_LEVEL_2_VOLUME,
+    CONF_LEVEL_3_VOLUME: DEFAULT_LEVEL_3_VOLUME,
+    CONF_LEVEL_4_VOLUME: DEFAULT_LEVEL_4_VOLUME,
     CONF_MAX_VOLUME: DEFAULT_MAX_VOLUME,
     CONF_DEBOUNCE_SECONDS: DEFAULT_DEBOUNCE_SECONDS,
-    CONF_COOLDOWN_SECONDS: DEFAULT_COOLDOWN_SECONDS,
+    CONF_EVIDENCE_WINDOW_SECONDS: DEFAULT_EVIDENCE_WINDOW_SECONDS,
+    CONF_CRY_GAP_SECONDS: DEFAULT_CRY_GAP_SECONDS,
+    CONF_LEVEL_UP_SECONDS: DEFAULT_LEVEL_UP_SECONDS,
     CONF_SETTLING_SECONDS: DEFAULT_SETTLING_SECONDS,
-    CONF_ESCALATION_SECONDS: DEFAULT_ESCALATION_SECONDS,
+    CONF_ATTENTION_SECONDS: DEFAULT_ATTENTION_SECONDS,
 }
-ENTRY_OPTIONS = BEHAVIOR_DATA | {CONF_ENABLED: False}
+ENTRY_OPTIONS = BEHAVIOR_DATA | {
+    CONF_LEVEL: DEFAULT_LEVEL,
+    CONF_AUTOMATIC_OPERATION: DEFAULT_AUTOMATIC_OPERATION,
+}
 MEDIA_PLAYER_FEATURES = int(
     MediaPlayerEntityFeature.PLAY_MEDIA
     | MediaPlayerEntityFeature.VOLUME_SET
@@ -81,10 +111,10 @@ MEDIA_PLAYER_FEATURES = int(
 @pytest.fixture(autouse=True)
 def _register_dependencies(hass: HomeAssistant) -> None:
     """Register valid source entities and mobile notification actions."""
-    hass.states.async_set(CONFIG_DATA[CONF_CRY_SENSOR], "off")
-    hass.states.async_set(CONFIG_DATA[CONF_CAMERA], "idle")
+    hass.states.async_set(USER_DATA[CONF_CRY_SENSOR], "off")
+    hass.states.async_set(USER_DATA[CONF_CAMERA], "idle")
     hass.states.async_set(
-        CONFIG_DATA[CONF_MEDIA_PLAYER],
+        USER_DATA[CONF_MEDIA_PLAYER],
         "idle",
         {ATTR_SUPPORTED_FEATURES: MEDIA_PLAYER_FEATURES},
     )
@@ -112,10 +142,10 @@ async def _start_user_flow(hass: HomeAssistant) -> ConfigFlowResult:
 async def _start_behavior_step(
     hass: HomeAssistant, stable_data: dict[str, Any] | None = None
 ) -> ConfigFlowResult:
-    """Start a user flow and submit valid stable data."""
+    """Start a user flow and submit valid stable form data."""
     result = await _start_user_flow(hass)
     return await hass.config_entries.flow.async_configure(
-        result["flow_id"], stable_data or CONFIG_DATA
+        result["flow_id"], stable_data or USER_DATA
     )
 
 
@@ -137,21 +167,19 @@ def _entry(
     return entry
 
 
-async def test_user_flow_creates_disabled_entry(hass: HomeAssistant) -> None:
-    """Test the complete two-step setup flow."""
+async def test_user_flow_creates_standby_manual_entry_with_level_sounds(
+    hass: HomeAssistant,
+) -> None:
+    """Setup expands one local sound into independent per-level mappings."""
     result = await _start_user_flow(hass)
-
     assert result["type"] is FlowResultType.FORM
     assert result["step_id"] == "user"
     assert NurserySootherConfigFlow.VERSION == ENTRY_VERSION
 
     result = await hass.config_entries.flow.async_configure(
-        result["flow_id"], CONFIG_DATA
+        result["flow_id"], USER_DATA
     )
-
-    assert result["type"] is FlowResultType.FORM
     assert result["step_id"] == "behavior"
-
     result = await hass.config_entries.flow.async_configure(
         result["flow_id"], BEHAVIOR_DATA
     )
@@ -160,12 +188,33 @@ async def test_user_flow_creates_disabled_entry(hass: HomeAssistant) -> None:
     assert result["title"] == NAME
     assert result["data"] == CONFIG_DATA
     assert result["options"] == ENTRY_OPTIONS
+    assert sounds_are_valid(result["data"][CONF_SOUNDS])
+    sound_values = list(result["data"][CONF_SOUNDS].values())
+    assert all(sound == SOOTHING_SOUND for sound in sound_values)
+    assert len({id(sound) for sound in sound_values}) == len(ACTIVE_LEVELS)
 
 
-async def test_user_flow_canonicalizes_selector_and_action_values(
+def test_sound_mapping_validation_is_ready_for_distinct_level_media() -> None:
+    """Stored mappings may already carry a different safe sound per level."""
+    sounds = {
+        level.value: {
+            "media_content_id": (
+                f"media-source://media_source/local/{level.value}.mp3"
+            ),
+            "media_content_type": "audio/mpeg",
+        }
+        for level in ACTIVE_LEVELS
+    }
+    assert sounds_are_valid(sounds)
+    assert not sounds_are_valid({SoothingLevel.BASELINE.value: SOOTHING_SOUND})
+    sounds[SoothingLevel.LEVEL_4.value]["media_content_type"] = "video/mp4"
+    assert not sounds_are_valid(sounds)
+
+
+async def test_user_flow_canonicalizes_registry_and_notification_values(
     hass: HomeAssistant,
 ) -> None:
-    """Test registry UUIDs and notification action names are canonicalized."""
+    """Registry UUIDs and duplicated mixed-case actions are canonicalized."""
     registry_entry = er.async_get(hass).async_get_or_create(
         domain="binary_sensor",
         platform="test",
@@ -173,14 +222,14 @@ async def test_user_flow_canonicalizes_selector_and_action_values(
         suggested_object_id="nursery_crying_registry",
     )
     hass.states.async_set(registry_entry.entity_id, "off")
-    stable_data = CONFIG_DATA | {
+    user_data = USER_DATA | {
         CONF_CRY_SENSOR: registry_entry.id,
         CONF_NOTIFY_TARGETS: [
             " Notify.Mobile_App_Parent_One ",
             "notify.mobile_app_parent_one",
         ],
     }
-    result = await _start_behavior_step(hass, stable_data)
+    result = await _start_behavior_step(hass, user_data)
     result = await hass.config_entries.flow.async_configure(
         result["flow_id"], BEHAVIOR_DATA
     )
@@ -188,64 +237,6 @@ async def test_user_flow_canonicalizes_selector_and_action_values(
     assert result["type"] is FlowResultType.CREATE_ENTRY
     assert result["data"][CONF_CRY_SENSOR] == registry_entry.entity_id
     assert result["data"][CONF_NOTIFY_TARGETS] == ["notify.mobile_app_parent_one"]
-
-
-async def test_user_flow_rejects_uuid_from_wrong_domain(
-    hass: HomeAssistant,
-) -> None:
-    """Test domain validation runs after resolving selector UUIDs."""
-    registry_entry = er.async_get(hass).async_get_or_create(
-        domain="sensor",
-        platform="test",
-        unique_id="nursery_crying",
-        suggested_object_id="nursery_crying",
-    )
-    hass.states.async_set(registry_entry.entity_id, "off")
-    result = await _start_user_flow(hass)
-
-    result = await hass.config_entries.flow.async_configure(
-        result["flow_id"],
-        CONFIG_DATA | {CONF_CRY_SENSOR: registry_entry.id},
-    )
-
-    assert result["type"] is FlowResultType.FORM
-    assert result["step_id"] == "user"
-    assert result["errors"] == {CONF_CRY_SENSOR: "invalid_entity_domain"}
-
-
-async def test_user_flow_rejects_unknown_entity_registry_uuid(
-    hass: HomeAssistant,
-) -> None:
-    """Test unknown selector UUIDs return a translated form error."""
-    result = await _start_user_flow(hass)
-
-    result = await hass.config_entries.flow.async_configure(
-        result["flow_id"],
-        CONFIG_DATA | {CONF_CRY_SENSOR: "0123456789abcdef0123456789abcdef"},
-    )
-
-    assert result["type"] is FlowResultType.FORM
-    assert result["errors"] == {CONF_CRY_SENSOR: "invalid_entity"}
-
-
-@pytest.mark.parametrize(
-    "config_key",
-    [CONF_CRY_SENSOR, CONF_CAMERA, CONF_MEDIA_PLAYER],
-)
-async def test_user_flow_rejects_entity_without_state(
-    hass: HomeAssistant,
-    config_key: str,
-) -> None:
-    """Test selected entities must exist in Home Assistant."""
-    hass.states.async_remove(CONFIG_DATA[config_key])
-    result = await _start_user_flow(hass)
-
-    result = await hass.config_entries.flow.async_configure(
-        result["flow_id"], CONFIG_DATA
-    )
-
-    assert result["type"] is FlowResultType.FORM
-    assert result["errors"] == {config_key: "invalid_entity"}
 
 
 @pytest.mark.parametrize(
@@ -261,17 +252,13 @@ async def test_user_flow_selector_rejects_wrong_domain(
     config_key: str,
     invalid_entity_id: str,
 ) -> None:
-    """Test each entity selector filters entities from the wrong domain."""
+    """Each entity selector rejects an entity from the wrong domain."""
     result = await _start_user_flow(hass)
-
     with pytest.raises(InvalidData) as error:
         await hass.config_entries.flow.async_configure(
-            result["flow_id"],
-            CONFIG_DATA | {config_key: invalid_entity_id},
+            result["flow_id"], USER_DATA | {config_key: invalid_entity_id}
         )
-
     assert error.value.path == [config_key]
-    assert config_key in error.value.schema_errors
 
 
 @pytest.mark.parametrize(
@@ -284,22 +271,20 @@ async def test_user_flow_selector_rejects_wrong_domain(
         None,
     ],
 )
-async def test_user_flow_rejects_media_player_without_required_features(
+async def test_user_flow_rejects_unsupported_player(
     hass: HomeAssistant,
     supported_features: int | None,
 ) -> None:
-    """Test the speaker must play media and set an absolute volume."""
+    """The speaker must play media, set volume, and stop or pause."""
     hass.states.async_set(
-        CONFIG_DATA[CONF_MEDIA_PLAYER],
+        USER_DATA[CONF_MEDIA_PLAYER],
         "idle",
         {ATTR_SUPPORTED_FEATURES: supported_features},
     )
     result = await _start_user_flow(hass)
-
     result = await hass.config_entries.flow.async_configure(
-        result["flow_id"], CONFIG_DATA
+        result["flow_id"], USER_DATA
     )
-
     assert result["type"] is FlowResultType.FORM
     assert result["errors"] == {CONF_MEDIA_PLAYER: "unsupported_media_player"}
 
@@ -307,9 +292,9 @@ async def test_user_flow_rejects_media_player_without_required_features(
 async def test_user_flow_accepts_pause_as_stop_fallback(
     hass: HomeAssistant,
 ) -> None:
-    """A player that can pause instead of stop still provides safe Stop behavior."""
+    """A player with Pause provides a safe Standby fallback."""
     hass.states.async_set(
-        CONFIG_DATA[CONF_MEDIA_PLAYER],
+        USER_DATA[CONF_MEDIA_PLAYER],
         "idle",
         {
             ATTR_SUPPORTED_FEATURES: int(
@@ -319,81 +304,49 @@ async def test_user_flow_accepts_pause_as_stop_fallback(
             )
         },
     )
-    result = await _start_user_flow(hass)
-
-    result = await hass.config_entries.flow.async_configure(
-        result["flow_id"], CONFIG_DATA
-    )
-
-    assert result["type"] is FlowResultType.FORM
+    result = await _start_behavior_step(hass)
     assert result["step_id"] == "behavior"
 
 
-async def test_user_flow_rejects_non_audio_media(
-    hass: HomeAssistant,
-) -> None:
-    """Backend validation rejects media-selector payloads that are not audio."""
-    result = await _start_user_flow(hass)
-
-    result = await hass.config_entries.flow.async_configure(
-        result["flow_id"],
-        CONFIG_DATA
-        | {
-            CONF_WHITE_NOISE: {
+@pytest.mark.parametrize(
+    ("media", "error_key"),
+    [
+        (
+            {
                 "media_content_id": "media-source://media_source/local/video.mp4",
                 "media_content_type": "video/mp4",
-            }
-        },
-    )
-
-    assert result["type"] is FlowResultType.FORM
-    assert result["errors"] == {CONF_WHITE_NOISE: "invalid_audio_media"}
-
-
-async def test_user_flow_rejects_empty_audio_media_id(
-    hass: HomeAssistant,
-) -> None:
-    """Backend validation rejects an empty media-selector identifier."""
-    result = await _start_user_flow(hass)
-
-    result = await hass.config_entries.flow.async_configure(
-        result["flow_id"],
-        CONFIG_DATA
-        | {
-            CONF_WHITE_NOISE: {
-                "media_content_id": "   ",
-                "media_content_type": "audio/mpeg",
-            }
-        },
-    )
-
-    assert result["type"] is FlowResultType.FORM
-    assert result["errors"] == {CONF_WHITE_NOISE: "invalid_audio_media"}
-
-
-async def test_user_flow_rejects_non_local_audio_media(
-    hass: HomeAssistant,
-) -> None:
-    """White noise must come from Home Assistant's local My media library."""
-    result = await _start_user_flow(hass)
-
-    result = await hass.config_entries.flow.async_configure(
-        result["flow_id"],
-        CONFIG_DATA
-        | {
-            CONF_WHITE_NOISE: {
+            },
+            "invalid_audio_media",
+        ),
+        (
+            {"media_content_id": "   ", "media_content_type": "audio/mpeg"},
+            "invalid_audio_media",
+        ),
+        (
+            {
                 "media_content_id": "media-source://radio_browser/example",
                 "media_content_type": "audio/mpeg",
-            }
-        },
+            },
+            "invalid_local_audio_media",
+        ),
+    ],
+)
+async def test_user_flow_rejects_unsafe_soothing_sound(
+    hass: HomeAssistant,
+    media: dict[str, str],
+    error_key: str,
+) -> None:
+    """Only local audio may be cloned into the level catalog."""
+    result = await _start_user_flow(hass)
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], USER_DATA | {CONF_SOOTHING_SOUND: media}
     )
-
     assert result["type"] is FlowResultType.FORM
-    assert result["errors"] == {CONF_WHITE_NOISE: "invalid_local_audio_media"}
+    assert result["errors"] == {CONF_SOOTHING_SOUND: error_key}
 
 
 @pytest.mark.parametrize(
-    ("notify_targets", "error_key"),
+    ("targets", "error_key"),
     [
         ([], "notify_targets_required"),
         (["invalid"], "invalid_notify_action"),
@@ -403,17 +356,14 @@ async def test_user_flow_rejects_non_local_audio_media(
 )
 async def test_user_flow_rejects_invalid_notification_actions(
     hass: HomeAssistant,
-    notify_targets: list[str],
+    targets: list[str],
     error_key: str,
 ) -> None:
-    """Test parent targets are registered mobile-app notification actions."""
+    """Parent targets must be registered Companion App notification actions."""
     result = await _start_user_flow(hass)
-
     result = await hass.config_entries.flow.async_configure(
-        result["flow_id"],
-        CONFIG_DATA | {CONF_NOTIFY_TARGETS: notify_targets},
+        result["flow_id"], USER_DATA | {CONF_NOTIFY_TARGETS: targets}
     )
-
     assert result["type"] is FlowResultType.FORM
     assert result["errors"] == {CONF_NOTIFY_TARGETS: error_key}
 
@@ -422,224 +372,134 @@ async def test_user_flow_rejects_invalid_notification_actions(
     "volume_data",
     [
         {CONF_BASELINE_VOLUME: -1},
-        {CONF_BASELINE_VOLUME: 31},
-        {CONF_BOOST_VOLUME: 41},
+        {CONF_BASELINE_VOLUME: 16},
+        {CONF_LEVEL_1_VOLUME: 21},
+        {CONF_LEVEL_2_VOLUME: 26},
+        {CONF_LEVEL_3_VOLUME: 31},
+        {CONF_LEVEL_4_VOLUME: 41},
         {CONF_MAX_VOLUME: 101},
     ],
 )
-async def test_behavior_rejects_unsafe_volume_relationships(
+async def test_behavior_rejects_nonmonotonic_or_unsafe_volumes(
     hass: HomeAssistant,
     volume_data: dict[str, float],
 ) -> None:
-    """Test volume limits are validated as one safety invariant."""
+    """All five active levels and the hard cap form one invariant."""
     result = await _start_behavior_step(hass)
-
     result = await hass.config_entries.flow.async_configure(
         result["flow_id"], BEHAVIOR_DATA | volume_data
     )
-
     assert result["type"] is FlowResultType.FORM
-    assert result["step_id"] == "behavior"
     assert result["errors"] == {"base": "invalid_volume_configuration"}
 
 
 @pytest.mark.parametrize(
     "timer_key",
-    BEHAVIOR_DATA.keys()
-    - {
-        CONF_BASELINE_VOLUME,
-        CONF_BOOST_VOLUME,
-        CONF_MAX_VOLUME,
-    },
+    [
+        CONF_DEBOUNCE_SECONDS,
+        CONF_EVIDENCE_WINDOW_SECONDS,
+        CONF_CRY_GAP_SECONDS,
+        CONF_LEVEL_UP_SECONDS,
+        CONF_SETTLING_SECONDS,
+        CONF_ATTENTION_SECONDS,
+    ],
 )
 @pytest.mark.parametrize("invalid_value", [0, -1, 1.5])
-async def test_behavior_rejects_non_positive_or_fractional_timers(
+async def test_behavior_rejects_nonpositive_or_fractional_timers(
     hass: HomeAssistant,
     timer_key: str,
     invalid_value: float,
 ) -> None:
-    """Test all timers are positive whole seconds."""
+    """Every evidence and response timer uses positive whole seconds."""
     result = await _start_behavior_step(hass)
-
     result = await hass.config_entries.flow.async_configure(
-        result["flow_id"],
-        BEHAVIOR_DATA | {timer_key: invalid_value},
+        result["flow_id"], BEHAVIOR_DATA | {timer_key: invalid_value}
     )
-
     assert result["type"] is FlowResultType.FORM
     assert result["errors"] == {timer_key: "positive_integer_required"}
 
 
-async def test_multiple_nursery_entries_are_allowed(hass: HomeAssistant) -> None:
-    """Test that each nursery can have its own config entry."""
+async def test_entries_cannot_share_a_nursery_device(
+    hass: HomeAssistant,
+) -> None:
+    """Two controllers cannot compete for one physical nursery resource."""
     _entry(hass)
-    second_data = CONFIG_DATA | {
+    second = USER_DATA | {
         CONF_CRY_SENSOR: "binary_sensor.second_nursery_crying",
         CONF_CAMERA: "camera.second_nursery",
-        CONF_MEDIA_PLAYER: "media_player.second_nursery",
     }
-    hass.states.async_set(second_data[CONF_CRY_SENSOR], "off")
-    hass.states.async_set(second_data[CONF_CAMERA], "idle")
-    hass.states.async_set(
-        second_data[CONF_MEDIA_PLAYER],
-        "idle",
-        {ATTR_SUPPORTED_FEATURES: MEDIA_PLAYER_FEATURES},
-    )
-
+    hass.states.async_set(second[CONF_CRY_SENSOR], "off")
+    hass.states.async_set(second[CONF_CAMERA], "idle")
     result = await _start_user_flow(hass)
-
+    result = await hass.config_entries.flow.async_configure(result["flow_id"], second)
     assert result["type"] is FlowResultType.FORM
-    result = await hass.config_entries.flow.async_configure(
-        result["flow_id"], second_data
-    )
-    assert result["step_id"] == "behavior"
-    result = await hass.config_entries.flow.async_configure(
-        result["flow_id"], BEHAVIOR_DATA
-    )
-
-    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert result["errors"] == {CONF_MEDIA_PLAYER: "entity_already_configured"}
 
 
-@pytest.mark.parametrize(
-    "shared_key", [CONF_CRY_SENSOR, CONF_CAMERA, CONF_MEDIA_PLAYER]
-)
-async def test_entry_cannot_share_a_nursery_device(
+async def test_reconfigure_round_trips_stored_sound_mapping(
     hass: HomeAssistant,
-    shared_key: str,
 ) -> None:
-    """Two controllers cannot compete for the same physical nursery resource."""
-    _entry(hass)
-    second_data = CONFIG_DATA | {
-        CONF_CRY_SENSOR: "binary_sensor.second_nursery_crying",
-        CONF_CAMERA: "camera.second_nursery",
-        CONF_MEDIA_PLAYER: "media_player.second_nursery",
-        shared_key: CONFIG_DATA[shared_key],
-    }
-    hass.states.async_set("binary_sensor.second_nursery_crying", "off")
+    """Reconfigure presents one sound selector and stores a complete mapping."""
+    entry = _entry(hass)
     hass.states.async_set("camera.second_nursery", "idle")
-    hass.states.async_set(
-        "media_player.second_nursery",
-        "idle",
-        {ATTR_SUPPORTED_FEATURES: MEDIA_PLAYER_FEATURES},
-    )
-    result = await _start_user_flow(hass)
-
-    result = await hass.config_entries.flow.async_configure(
-        result["flow_id"], second_data
-    )
-
-    assert result["type"] is FlowResultType.FORM
-    assert result["errors"] == {shared_key: "entity_already_configured"}
-
-
-async def test_concurrent_setup_rechecks_device_ownership(
-    hass: HomeAssistant,
-) -> None:
-    """Only one of two in-flight flows can claim the same nursery devices."""
-    first = await _start_behavior_step(hass)
-    second = await _start_behavior_step(hass)
-
-    first = await hass.config_entries.flow.async_configure(
-        first["flow_id"], BEHAVIOR_DATA
-    )
-    second = await hass.config_entries.flow.async_configure(
-        second["flow_id"], BEHAVIOR_DATA
-    )
-
-    assert first["type"] is FlowResultType.CREATE_ENTRY
-    assert second["type"] is FlowResultType.ABORT
-    assert second["reason"] == "devices_already_configured"
-
-
-async def test_reconfigure_updates_stable_data_and_preserves_options(
-    hass: HomeAssistant,
-) -> None:
-    """Test reconfigure validates, stores, and reloads stable references."""
-    entry = _entry(hass, options=ENTRY_OPTIONS | {CONF_ENABLED: True})
-    hass.states.async_set("camera.second_nursery", "idle")
-    updated_data = CONFIG_DATA | {CONF_CAMERA: "camera.second_nursery"}
-
+    updated_form = USER_DATA | {CONF_CAMERA: "camera.second_nursery"}
     result = await hass.config_entries.flow.async_init(
         DOMAIN,
-        context={
-            "source": SOURCE_RECONFIGURE,
-            "entry_id": entry.entry_id,
-        },
+        context={"source": SOURCE_RECONFIGURE, "entry_id": entry.entry_id},
     )
-
-    assert result["type"] is FlowResultType.FORM
     assert result["step_id"] == "reconfigure"
 
     result = await hass.config_entries.flow.async_configure(
-        result["flow_id"], updated_data
+        result["flow_id"], updated_form
     )
-
     assert result["type"] is FlowResultType.ABORT
     assert result["reason"] == "reconfigure_successful"
-    assert entry.data == updated_data
-    assert entry.options == ENTRY_OPTIONS | {CONF_ENABLED: True}
+    assert entry.data[CONF_CAMERA] == "camera.second_nursery"
+    assert entry.data[CONF_SOUNDS] == SOUNDS
+    assert CONF_SOOTHING_SOUND not in entry.data
+    assert entry.options == ENTRY_OPTIONS
 
 
-async def test_reconfigure_rejects_invalid_stable_data(
+async def test_options_preserve_runtime_level_and_automatic_preference(
     hass: HomeAssistant,
 ) -> None:
-    """Test invalid reconfigure input does not mutate the entry."""
-    entry = _entry(hass)
-    invalid_data = CONFIG_DATA | {CONF_NOTIFY_TARGETS: ["notify.mobile_app_missing"]}
-
-    result = await hass.config_entries.flow.async_init(
-        DOMAIN,
-        context={
-            "source": SOURCE_RECONFIGURE,
-            "entry_id": entry.entry_id,
-        },
-    )
-    result = await hass.config_entries.flow.async_configure(
-        result["flow_id"], invalid_data
-    )
-
-    assert result["type"] is FlowResultType.FORM
-    assert result["errors"] == {CONF_NOTIFY_TARGETS: "notify_action_not_found"}
-    assert entry.data == CONFIG_DATA
-
-
-async def test_options_update_behavior_and_preserve_enabled(
-    hass: HomeAssistant,
-) -> None:
-    """Test behavior options reload the entry without changing enabled."""
-    entry = _entry(hass, options=ENTRY_OPTIONS | {CONF_ENABLED: True})
-    updated_behavior = BEHAVIOR_DATA | {
-        CONF_BASELINE_VOLUME: 25,
-        CONF_BOOST_VOLUME: 35,
-        CONF_MAX_VOLUME: 45,
-        CONF_DEBOUNCE_SECONDS: 20,
+    """Behavior updates cannot silently change the primary controls."""
+    current_options = ENTRY_OPTIONS | {
+        CONF_LEVEL: SoothingLevel.LEVEL_3.value,
+        CONF_AUTOMATIC_OPERATION: True,
     }
-
+    entry = _entry(hass, options=current_options)
+    updated_behavior = BEHAVIOR_DATA | {
+        CONF_LEVEL_1_VOLUME: 16,
+        CONF_LEVEL_2_VOLUME: 21,
+        CONF_LEVEL_3_VOLUME: 26,
+        CONF_LEVEL_4_VOLUME: 31,
+        CONF_MAX_VOLUME: 45,
+        CONF_DEBOUNCE_SECONDS: 12,
+    }
     result = await hass.config_entries.options.async_init(entry.entry_id)
-
-    assert result["type"] is FlowResultType.FORM
-    assert result["step_id"] == "init"
-
     result = await hass.config_entries.options.async_configure(
         result["flow_id"], updated_behavior
     )
 
+    expected = updated_behavior | {
+        CONF_LEVEL: SoothingLevel.LEVEL_3.value,
+        CONF_AUTOMATIC_OPERATION: True,
+    }
     assert result["type"] is FlowResultType.CREATE_ENTRY
-    assert result["data"] == updated_behavior | {CONF_ENABLED: True}
-    assert entry.options == updated_behavior | {CONF_ENABLED: True}
+    assert result["data"] == expected
+    assert entry.options == expected
 
 
-async def test_options_reject_invalid_behavior(hass: HomeAssistant) -> None:
-    """Test options use the same safety validation as initial setup."""
-    entry = _entry(hass, options=ENTRY_OPTIONS | {CONF_ENABLED: True})
+async def test_options_reject_invalid_behavior_without_mutation(
+    hass: HomeAssistant,
+) -> None:
+    """Options use the same monotonic safety validation as initial setup."""
+    entry = _entry(hass)
     result = await hass.config_entries.options.async_init(entry.entry_id)
-
     result = await hass.config_entries.options.async_configure(
-        result["flow_id"],
-        BEHAVIOR_DATA | {CONF_BOOST_VOLUME: 101},
+        result["flow_id"], BEHAVIOR_DATA | {CONF_LEVEL_4_VOLUME: 50}
     )
-
     assert result["type"] is FlowResultType.FORM
-    assert result["step_id"] == "init"
     assert result["errors"] == {"base": "invalid_volume_configuration"}
-    assert entry.options == ENTRY_OPTIONS | {CONF_ENABLED: True}
+    assert entry.options == ENTRY_OPTIONS

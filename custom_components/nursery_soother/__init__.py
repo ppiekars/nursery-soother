@@ -6,21 +6,25 @@ import logging
 from typing import TYPE_CHECKING, Any
 
 from homeassistant.config_entries import ConfigEntry, ConfigEntryError
-from homeassistant.const import Platform
 from homeassistant.core import valid_entity_id
-from homeassistant.helpers import entity_registry as er
 
 from .const import (
+    CONF_ATTENTION_SECONDS,
+    CONF_AUTOMATIC_OPERATION,
     CONF_BASELINE_VOLUME,
-    CONF_BOOST_VOLUME,
-    CONF_COOLDOWN_SECONDS,
+    CONF_CRY_GAP_SECONDS,
     CONF_DEBOUNCE_SECONDS,
-    CONF_ENABLED,
-    CONF_ESCALATION_SECONDS,
+    CONF_EVIDENCE_WINDOW_SECONDS,
+    CONF_LEVEL,
+    CONF_LEVEL_1_VOLUME,
+    CONF_LEVEL_2_VOLUME,
+    CONF_LEVEL_3_VOLUME,
+    CONF_LEVEL_4_VOLUME,
+    CONF_LEVEL_UP_SECONDS,
     CONF_MAX_VOLUME,
     CONF_NOTIFY_TARGETS,
     CONF_SETTLING_SECONDS,
-    CONF_WHITE_NOISE,
+    CONF_SOUNDS,
     DEFAULT_OPTIONS,
     DOMAIN,
     ENTITY_DOMAINS,
@@ -28,7 +32,7 @@ from .const import (
     PLATFORMS,
 )
 from .controller import NurserySootherController
-from .models import SootherSettings
+from .models import ACTIVE_LEVELS, SootherSettings, SoothingLevel
 
 if TYPE_CHECKING:
     from homeassistant.core import HomeAssistant
@@ -36,6 +40,25 @@ if TYPE_CHECKING:
 type NurserySootherConfigEntry = ConfigEntry[NurserySootherController]
 
 _LOGGER = logging.getLogger(__name__)
+
+_VOLUME_KEYS = (
+    CONF_BASELINE_VOLUME,
+    CONF_LEVEL_1_VOLUME,
+    CONF_LEVEL_2_VOLUME,
+    CONF_LEVEL_3_VOLUME,
+    CONF_LEVEL_4_VOLUME,
+    CONF_MAX_VOLUME,
+)
+_TIMER_KEYS = (
+    CONF_DEBOUNCE_SECONDS,
+    CONF_EVIDENCE_WINDOW_SECONDS,
+    CONF_CRY_GAP_SECONDS,
+    CONF_LEVEL_UP_SECONDS,
+    CONF_SETTLING_SECONDS,
+    CONF_ATTENTION_SECONDS,
+)
+_LOCAL_MEDIA_PREFIX = "media-source://media_source/local/"
+_MOBILE_NOTIFY_PREFIX = "notify.mobile_app_"
 
 
 def _validate_entry_device_ownership(
@@ -55,8 +78,44 @@ def _validate_entry_device_ownership(
             )
 
 
+def _media_is_valid(media: object) -> bool:
+    """Return whether one stored profile selects safe local audio."""
+    if not isinstance(media, dict):
+        return False
+    content_id = media.get("media_content_id")
+    content_type = media.get("media_content_type")
+    return (
+        isinstance(content_id, str)
+        and bool(content_id.strip())
+        and content_id.startswith(_LOCAL_MEDIA_PREFIX)
+        and isinstance(content_type, str)
+        and content_type.startswith("audio/")
+    )
+
+
+def _functional_data_is_valid(entry: ConfigEntry[Any]) -> bool:
+    """Validate the complete level-sound catalog and parent targets."""
+    sounds = entry.data.get(CONF_SOUNDS)
+    expected_sound_keys = {level.value for level in ACTIVE_LEVELS}
+    targets = entry.data.get(CONF_NOTIFY_TARGETS)
+    return (
+        isinstance(sounds, dict)
+        and set(sounds) == expected_sound_keys
+        and all(_media_is_valid(sounds[key]) for key in expected_sound_keys)
+        and isinstance(targets, list)
+        and bool(targets)
+        and all(
+            isinstance(target, str)
+            and valid_entity_id(target)
+            and target.startswith(_MOBILE_NOTIFY_PREFIX)
+            and len(target) > len(_MOBILE_NOTIFY_PREFIX)
+            for target in targets
+        )
+    )
+
+
 def _validate_entry_data(hass: HomeAssistant, entry: ConfigEntry[Any]) -> None:
-    """Validate persisted data independently of the config flow."""
+    """Validate persisted v4 data independently of the config flow."""
     for config_key, expected_domain in ENTITY_DOMAINS.items():
         entity_id = entry.data.get(config_key)
         if not isinstance(entity_id, str) or not valid_entity_id(entity_id):
@@ -86,31 +145,18 @@ def _validate_entry_data(hass: HomeAssistant, entry: ConfigEntry[Any]) -> None:
             translation_domain=DOMAIN,
             translation_key="invalid_options",
         ) from err
-    volume_values = [
-        raw_options[key]
-        for key in (CONF_BASELINE_VOLUME, CONF_BOOST_VOLUME, CONF_MAX_VOLUME)
-    ]
-    timer_values = [
-        raw_options[key]
-        for key in (
-            CONF_DEBOUNCE_SECONDS,
-            CONF_COOLDOWN_SECONDS,
-            CONF_SETTLING_SECONDS,
-            CONF_ESCALATION_SECONDS,
-        )
-    ]
+
     if (
-        not isinstance(raw_options[CONF_ENABLED], bool)
+        not isinstance(raw_options[CONF_LEVEL], str)
+        or not isinstance(settings.level, SoothingLevel)
+        or not isinstance(raw_options[CONF_AUTOMATIC_OPERATION], bool)
         or any(
             isinstance(value, bool) or not isinstance(value, int | float)
-            for value in volume_values
+            for value in (raw_options[key] for key in _VOLUME_KEYS)
         )
         or any(
-            isinstance(value, bool)
-            or not isinstance(value, int | float)
-            or float(value) <= 0
-            or not float(value).is_integer()
-            for value in timer_values
+            isinstance(value, bool) or not isinstance(value, int) or value <= 0
+            for value in (raw_options[key] for key in _TIMER_KEYS)
         )
         or not settings.volumes_are_valid()
     ):
@@ -119,63 +165,17 @@ def _validate_entry_data(hass: HomeAssistant, entry: ConfigEntry[Any]) -> None:
             translation_key="invalid_options",
         )
 
-    has_functional_data = any(
-        key in entry.data for key in (CONF_WHITE_NOISE, CONF_NOTIFY_TARGETS)
-    )
-    if has_functional_data:
-        media = entry.data.get(CONF_WHITE_NOISE)
-        targets = entry.data.get(CONF_NOTIFY_TARGETS)
-        if not (
-            isinstance(media, dict)
-            and isinstance(media.get("media_content_id"), str)
-            and bool(media["media_content_id"].strip())
-            and media["media_content_id"].startswith("media-source://media_source/")
-            and isinstance(media.get("media_content_type"), str)
-            and media["media_content_type"].startswith("audio/")
-            and isinstance(targets, list)
-            and bool(targets)
-            and all(
-                isinstance(target, str) and target.startswith("notify.mobile_app_")
-                for target in targets
-            )
-        ):
-            raise ConfigEntryError(
-                translation_domain=DOMAIN,
-                translation_key="invalid_configuration",
-            )
+    if not _functional_data_is_valid(entry):
+        raise ConfigEntryError(
+            translation_domain=DOMAIN,
+            translation_key="invalid_configuration",
+        )
 
 
 async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry[Any]) -> bool:
-    """Migrate the inert foundation without starting nursery playback."""
-    if entry.version > ENTRY_VERSION:
-        return False
-    if entry.version == ENTRY_VERSION:
-        return True
-    if entry.version not in {1, 2}:
-        return False
-
-    options = dict(entry.options)
-    if entry.version == 1:
-        options = DEFAULT_OPTIONS | options
-        # The foundation did not collect media or notification configuration.
-        # Keep it safely disabled until Reconfigure is completed in the UI.
-        options[CONF_ENABLED] = False
-
-    registry = er.async_get(hass)
-    legacy_simulator = registry.async_get_entity_id(
-        Platform.SWITCH,
-        DOMAIN,
-        f"{entry.entry_id}_simulated_cry",
-    )
-    if legacy_simulator is not None:
-        registry.async_remove(legacy_simulator)
-
-    hass.config_entries.async_update_entry(
-        entry,
-        options=options,
-        version=ENTRY_VERSION,
-    )
-    return True
+    """Accept only entries already created with the clean v4 contract."""
+    del hass
+    return entry.version == ENTRY_VERSION
 
 
 async def async_setup_entry(

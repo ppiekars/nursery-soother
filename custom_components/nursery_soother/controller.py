@@ -47,25 +47,34 @@ from homeassistant.helpers.network import is_hass_url
 from homeassistant.util import dt as dt_util
 
 from .const import (
-    ACTION_ACKNOWLEDGE,
-    ACTION_BASELINE,
-    ACTION_BOOST,
-    ACTION_STOP,
+    ACTION_SET_LEVEL,
+    ACTION_SET_MANUAL,
     CONF_BASELINE_VOLUME,
-    CONF_BOOST_VOLUME,
     CONF_CAMERA,
     CONF_CRY_SENSOR,
+    CONF_LEVEL_1_VOLUME,
+    CONF_LEVEL_2_VOLUME,
+    CONF_LEVEL_3_VOLUME,
+    CONF_LEVEL_4_VOLUME,
     CONF_MAX_VOLUME,
     CONF_MEDIA_PLAYER,
     CONF_NOTIFY_TARGETS,
-    CONF_WHITE_NOISE,
+    CONF_SOUNDS,
     DOMAIN,
     EVENT_NOTIFICATION_ACTION,
     MAX_VOLUME_PERCENT,
     NOTIFICATION_ACTION_PREFIX,
     NOTIFICATION_TAG_PREFIX,
 )
-from .models import Recommendation, SootherSettings, SootherState
+from .evidence import CryEvidence, EvidenceSnapshot
+from .models import (
+    ACTIVE_LEVELS,
+    LEVEL_VOLUME_KEYS,
+    Recommendation,
+    SootherSettings,
+    SootherState,
+    SoothingLevel,
+)
 
 if TYPE_CHECKING:
     from datetime import datetime
@@ -75,10 +84,11 @@ if TYPE_CHECKING:
 
 _LOGGER = logging.getLogger(__name__)
 SERVICE_CALL_TIMEOUT = 10
-SIMULATED_CRY_EVENT_RELEASE_GRACE_SECONDS = 2
 FAILED_PLAY_COMPENSATION_SECONDS = 15
 AUTH_SIGNATURE_QUERY_PARAMETER = "authSig"
 LOCAL_MEDIA_URL_PREFIX = "/media/"
+CRY_EVENT_THRESHOLD = 3
+CRY_ACTIVE_SECONDS_THRESHOLD = 10.0
 
 type ControllerListener = Callable[[], None]
 
@@ -101,10 +111,13 @@ class NurserySootherController:
         self.cry_sensor = self._string_data(CONF_CRY_SENSOR)
         self.camera = self._string_data(CONF_CAMERA)
         self.media_player = self._string_data(CONF_MEDIA_PLAYER)
-        configured_media = entry.data.get(CONF_WHITE_NOISE)
-        self.white_noise = (
-            dict(configured_media) if isinstance(configured_media, dict) else None
-        )
+        configured_sounds = entry.data.get(CONF_SOUNDS)
+        self.sounds: dict[SoothingLevel, dict[str, Any]] = {}
+        if isinstance(configured_sounds, dict):
+            for level in ACTIVE_LEVELS:
+                configured_media = configured_sounds.get(level.value)
+                if isinstance(configured_media, dict):
+                    self.sounds[level] = dict(configured_media)
         configured_targets = entry.data.get(CONF_NOTIFY_TARGETS)
         self.notify_targets = (
             tuple(target for target in configured_targets if isinstance(target, str))
@@ -112,27 +125,29 @@ class NurserySootherController:
             else ()
         )
 
-        self.state = SootherState.DISABLED
-        self.recommendation = Recommendation.ENABLE
-        self._acknowledged = False
-        self._boosted = False
-        self._synthetic_cry_event_active = False
-        self._cry_input_active = False
+        self.state = SootherState.STANDBY
+        self.recommendation = Recommendation.START
         self._episode = 0
+        self._action_generation = 0
         self._session_id = secrets.token_hex(8)
         self._incident_active = False
-        self._last_boost_at: datetime | None = None
+        self._episode_confirmed = False
+        self._episode_started_at: datetime | None = None
+        self._confirmed_at: datetime | None = None
+        self._last_cry_activity_at: datetime | None = None
+        self._last_level_change_at: datetime | None = None
+        self._stage_simulated_events = 0
+        self._evidence = CryEvidence(self.settings.evidence_window_seconds)
         self._last_error: str | None = None
         self._last_reason = "initialized"
         self._last_transition_at = dt_util.utcnow()
 
         self._listeners: set[ControllerListener] = set()
         self._unsubscribers: list[CALLBACK_TYPE] = []
-        self._cancel_debounce: CALLBACK_TYPE | None = None
-        self._cancel_cooldown: CALLBACK_TYPE | None = None
-        self._cancel_escalation: CALLBACK_TYPE | None = None
-        self._cancel_simulated_cry_event: CALLBACK_TYPE | None = None
+        self._cancel_evidence: CALLBACK_TYPE | None = None
+        self._cancel_cry_gap: CALLBACK_TYPE | None = None
         self._cancel_settling: CALLBACK_TYPE | None = None
+        self._cancel_attention: CALLBACK_TYPE | None = None
         self._dependency_issues: set[str] = set()
         self._owns_playback = False
         self._playback_interrupted = False
@@ -141,25 +156,46 @@ class NurserySootherController:
         self._awaiting_playback_confirmation = False
         self._pending_play_context_id: str | None = None
         self._failed_play_context_ids: set[str] = set()
+        self._failed_play_media_content_ids: dict[str, str] = {}
         self._failed_play_expiries: dict[str, CALLBACK_TYPE] = {}
         self._started = False
         self._lock = asyncio.Lock()
 
     @property
     def enabled(self) -> bool:
-        """Return whether the response loop is enabled."""
-        return self.settings.enabled
+        """Return whether an active soothing level is selected."""
+        return self.level is not SoothingLevel.STANDBY
+
+    @property
+    def level(self) -> SoothingLevel:
+        """Return the selected soothing level."""
+        return self.settings.level
+
+    @property
+    def automatic(self) -> bool:
+        """Return whether confirmed crying may increase the level."""
+        return self.settings.automatic_operation
+
+    @property
+    def suggested_level(self) -> SoothingLevel | None:
+        """Return the exact next level for a manual recommendation."""
+        if self.recommendation is not Recommendation.INCREASE_LEVEL:
+            return None
+        return self.level.next_active()
 
     @property
     def configured(self) -> bool:
-        """Return whether data added after the foundation release is present."""
+        """Return whether every stable dependency and sound is configured."""
         return (
             self.cry_sensor is not None
             and self.camera is not None
             and self.media_player is not None
-            and isinstance(self.white_noise, dict)
-            and isinstance(self.white_noise.get(ATTR_MEDIA_CONTENT_ID), str)
-            and isinstance(self.white_noise.get(ATTR_MEDIA_CONTENT_TYPE), str)
+            and all(
+                isinstance(self.sounds.get(level), dict)
+                and isinstance(self.sounds[level].get(ATTR_MEDIA_CONTENT_ID), str)
+                and isinstance(self.sounds[level].get(ATTR_MEDIA_CONTENT_TYPE), str)
+                for level in ACTIVE_LEVELS
+            )
             and bool(self.notify_targets)
         )
 
@@ -170,8 +206,8 @@ class NurserySootherController:
 
     @property
     def attention_required(self) -> bool:
-        """Return whether the incident still needs a parent's acknowledgement."""
-        return self.state is SootherState.ATTENTION_REQUIRED and not self._acknowledged
+        """Return whether the controller is asking a parent to intervene."""
+        return self.state is SootherState.ATTENTION_REQUIRED
 
     @property
     def notification_tag(self) -> str:
@@ -181,23 +217,30 @@ class NurserySootherController:
     @property
     def diagnostics(self) -> dict[str, Any]:
         """Return privacy-safe runtime diagnostics."""
+        evidence = self._evidence.snapshot(dt_util.utcnow())
         return {
             "state": self.state,
             "recommendation": self.recommendation,
+            "level": self.level,
+            "automatic_operation": self.automatic,
             "enabled": self.enabled,
             "configured": self.configured,
             "dependencies_available": self.dependencies_available,
             "dependency_issue_types": sorted(self._dependency_issues),
-            "acknowledged": self._acknowledged,
-            "boosted": self._boosted,
+            "cry_episode_active": self._incident_active,
+            "cry_episode_confirmed": self._episode_confirmed,
+            "stage_evidence": {
+                "events": evidence.events,
+                "active_seconds": round(evidence.active_seconds, 3),
+                "simulated_events": self._stage_simulated_events,
+            },
             "playback_owned": self._owns_playback,
             "playback_interrupted": self._playback_interrupted,
             "timers": {
-                "debounce": self._cancel_debounce is not None,
-                "cooldown": self._cancel_cooldown is not None,
-                "escalation": self._cancel_escalation is not None,
-                "simulated_cry_event": (self._cancel_simulated_cry_event is not None),
+                "evidence": self._cancel_evidence is not None,
+                "cry_gap": self._cancel_cry_gap is not None,
                 "settling": self._cancel_settling is not None,
+                "attention": self._cancel_attention is not None,
                 "failed_play_compensation": bool(self._failed_play_context_ids),
             },
             "last_reason": self._last_reason,
@@ -217,7 +260,7 @@ class NurserySootherController:
         return _remove_listener
 
     async def async_start(self) -> None:
-        """Start listeners and recover into a conservative fresh state."""
+        """Start listeners and restore the selected soothing session."""
         async with self._lock:
             await self._async_start_locked()
 
@@ -245,20 +288,19 @@ class NurserySootherController:
             )
         self._dependency_issues = self._find_dependency_issues()
 
-        if not self.enabled:
-            recommendation = (
-                Recommendation.ENABLE if self.configured else Recommendation.CONFIGURE
-            )
-            self._transition(SootherState.DISABLED, recommendation, "safe startup")
-            return
-
         if not self.configured:
-            self.settings.enabled = False
+            self.settings.level = SoothingLevel.STANDBY
             self._persist_settings()
             self._transition(
-                SootherState.DISABLED,
-                Recommendation.CONFIGURE,
-                "incomplete migrated configuration",
+                SootherState.ATTENTION_REQUIRED,
+                Recommendation.CHECK_DEVICES,
+                "incomplete configuration",
+            )
+            return
+
+        if not self.enabled:
+            self._transition(
+                SootherState.STANDBY, Recommendation.START, "standby startup"
             )
             return
 
@@ -271,7 +313,29 @@ class NurserySootherController:
             await self._async_notify_dependency_problem()
             return
 
-        await self._async_recover_baseline()
+        if self._media_player_is_active():
+            self._playback_interrupted = True
+            self.settings.level = SoothingLevel.STANDBY
+            self._persist_settings()
+            self._transition(
+                SootherState.ATTENTION_REQUIRED,
+                Recommendation.CHECK_DEVICES,
+                "speaker already active at startup",
+            )
+            await self._async_notify_playback_replaced()
+            return
+
+        if not await self._async_ensure_playback():
+            return
+        self._transition(
+            SootherState.SOOTHING,
+            Recommendation.NONE,
+            f"restored {self.level.value}",
+        )
+        if self._physical_cry_is_on():
+            now = dt_util.utcnow()
+            self._start_cry_episode(now, physical_active=True)
+            await self._async_evaluate_cry_evidence(now)
 
     async def async_shutdown(self) -> bool:
         """Cancel work and prevent integration-owned playback from being orphaned."""
@@ -287,179 +351,174 @@ class NurserySootherController:
             self._unsubscribers.clear()
             return stopped
 
-    async def async_set_enabled(self, *, enabled: bool) -> None:
-        """Enable or disable the response loop."""
-        if enabled:
-            await self._async_enable()
-        else:
-            await self.async_stop()
-
     async def async_simulate_cry_event(self) -> None:
-        """Inject one finite cry-detection event through the normal response path."""
+        """Inject one point-in-time cry event through the normal response path."""
         async with self._lock:
             self._ensure_started()
+            if not self.enabled:
+                return
             self._validate_controllable()
-            if self._synthetic_cry_event_active:
-                return
-            if self._physical_cry_is_on():
-                raise ServiceValidationError(
-                    translation_domain=DOMAIN,
-                    translation_key="cry_already_active",
-                )
+            now = dt_util.utcnow()
+            if not self._incident_active:
+                self._start_cry_episode(now, physical_active=False)
+            self._evidence.record_event(now)
+            self._stage_simulated_events += 1
+            self._record_cry_activity(now)
+            await self._async_evaluate_cry_evidence(now)
 
-            self._new_episode()
-            self._synthetic_cry_event_active = True
-            self._cry_input_active = True
-            self._begin_cry_pending(new_episode=False)
-            self._schedule_simulated_cry_event_release()
-
-    async def _async_enable(self) -> None:
-        """Enable baseline playback and start a fresh response episode."""
+    async def async_set_level(
+        self,
+        level: SoothingLevel | str,
+        *,
+        expected_action_generation: int | None = None,
+    ) -> None:
+        """Select Standby or one exact soothing output level."""
+        requested = SoothingLevel(level)
         async with self._lock:
             self._ensure_started()
-            if self.enabled:
+            if (
+                expected_action_generation is not None
+                and expected_action_generation != self._action_generation
+            ):
                 return
-            if self._failed_play_context_ids:
+            if requested is self.level:
+                if requested is SoothingLevel.STANDBY and self._playback_interrupted:
+                    self._playback_interrupted = False
+                    self._transition(
+                        SootherState.STANDBY,
+                        Recommendation.START,
+                        "speaker interruption reset in standby",
+                    )
+                    await self._async_clear_notifications()
+                return
+            if requested is SoothingLevel.STANDBY:
+                await self._async_enter_standby("standby selected by parent")
+                return
+            await self._async_set_active_level(requested)
+
+    async def _async_set_active_level(self, requested: SoothingLevel) -> None:
+        """Validate and apply one active level while the public lock is held."""
+        previous_level = self.level
+        self._validate_active_level_request()
+        previous_media = self._media_for_level(previous_level)
+        if self.enabled and not await self._async_playback_is_owned_now(
+            notify_interruption=False
+        ):
+            if self._playback_interrupted and self.level is SoothingLevel.STANDBY:
+                previous_level = SoothingLevel.STANDBY
+                previous_media = None
+            else:
                 raise ServiceValidationError(
                     translation_domain=DOMAIN,
                     translation_key="playback_settling",
                 )
-            if not self.configured:
-                raise ServiceValidationError(
-                    translation_domain=DOMAIN,
-                    translation_key="not_configured",
-                )
+        self.settings.level = requested
+        now = dt_util.utcnow()
+        if not await self._async_apply_level(previous_media):
+            self._restore_level_after_failed_effect(previous_level)
+            return
+        self._persist_settings()
 
-            self.settings.enabled = True
-            self._persist_settings()
-            self._new_episode()
-            self._reset_boost_cooldown()
-            self._dependency_issues = self._find_dependency_issues()
-            if self._dependency_issues:
-                self._transition(
-                    SootherState.ATTENTION_REQUIRED,
-                    Recommendation.CHECK_DEVICES,
-                    "enabled with unavailable dependency",
-                )
-                await self._async_notify_dependency_problem()
-                return
-
-            await self._async_recover_baseline()
-
-    async def async_stop(self, *, expected_episode: int | None = None) -> None:
-        """Disable the response loop and stop integration-owned playback."""
-        async with self._lock:
-            if not self._started:
-                return
-            if expected_episode is not None and expected_episode != self._episode:
-                return
-            self.settings.enabled = False
-            self._persist_settings()
-            self._new_episode()
-            self._reset_boost_cooldown()
+        if previous_level is SoothingLevel.STANDBY:
+            await self._async_started_active_level(requested, now)
+            return
+        self._last_level_change_at = now
+        if self._incident_active:
+            self._reset_evidence_stage(now)
             self._transition(
-                SootherState.DISABLED, Recommendation.ENABLE, "stopped by parent"
-            )
-            stopped = await self._async_stop_playback()
-            await self._async_clear_notifications()
-            if not stopped:
-                self._transition(
-                    SootherState.ATTENTION_REQUIRED,
-                    Recommendation.CHECK_DEVICES,
-                    "speaker stop failed",
-                )
-                await self._async_notify_dependency_problem()
-
-    async def async_boost(self, *, expected_episode: int | None = None) -> bool:
-        """Apply the one parent-authorized temporary boost, subject to safety."""
-        async with self._lock:
-            if expected_episode is not None and expected_episode != self._episode:
-                return False
-            self._validate_controllable()
-            if self._boosted:
-                return False
-
-            now = dt_util.utcnow()
-            if (
-                self._last_boost_at is not None
-                and (now - self._last_boost_at).total_seconds()
-                < self.settings.cooldown_seconds
-            ):
-                previous_recommendation = self.recommendation
-                self._transition(
-                    self.state, Recommendation.COOLDOWN, "boost rejected by cooldown"
-                )
-                self._schedule_cooldown_expiry(now, previous_recommendation)
-                return False
-
-            self._new_episode()
-            self._incident_active = True
-            if not await self._async_set_speaker_volume(self.settings.boost_volume):
-                self._boosted = False
-                self._incident_active = False
-                return False
-            self._boosted = True
-            self._last_boost_at = now
-
-            self._transition(
-                SootherState.BOOST,
+                SootherState.RESPONDING,
                 Recommendation.OBSERVE,
-                "boost authorized by parent",
+                f"{requested.value} selected during cry episode",
             )
-            await self._async_clear_notifications()
-            if self._cry_is_on():
-                self._schedule_escalation()
-            else:
-                self._schedule_settling()
-            return True
-
-    async def async_baseline(self, *, expected_episode: int | None = None) -> None:
-        """Return to baseline and mark an active episode parent-owned."""
-        async with self._lock:
-            if expected_episode is not None and expected_episode != self._episode:
-                return
-            self._validate_controllable()
-            self._new_episode()
-            self._boosted = False
-            self._acknowledged = self._cry_is_on()
-            if not await self._async_set_speaker_volume(self.settings.baseline_volume):
-                return
-            self._reset_boost_cooldown()
-            if self._cry_is_on():
-                self._transition(
-                    SootherState.CRY_PENDING,
-                    Recommendation.ACKNOWLEDGED,
-                    "baseline selected by parent",
-                )
-            else:
-                self._transition(
-                    SootherState.BASELINE,
-                    Recommendation.NONE,
-                    "baseline selected by parent",
-                )
-            await self._async_clear_notifications()
-
-    async def async_acknowledge(self, *, expected_episode: int | None = None) -> None:
-        """Mark the current episode as handled by either parent."""
-        async with self._lock:
-            if not self._started:
-                return
-            if expected_episode is not None and expected_episode != self._episode:
-                return
-            if not self.enabled:
-                return
-            was_settling = self._cancel_settling is not None
-            self._episode += 1
-            self._acknowledged = True
-            self._cancel_timer("escalation")
-            if was_settling:
-                self._schedule_settling()
+            await self._async_evaluate_cry_evidence(now)
+        else:
             self._transition(
-                self.state,
-                Recommendation.ACKNOWLEDGED,
-                "acknowledged by parent",
+                SootherState.SOOTHING,
+                Recommendation.NONE,
+                f"{requested.value} selected by parent",
             )
-            await self._async_clear_notifications()
+        await self._async_clear_notifications()
+
+    def _validate_active_level_request(self) -> None:
+        """Reject an active-level request that cannot safely start or change."""
+        if self._failed_play_context_ids:
+            raise ServiceValidationError(
+                translation_domain=DOMAIN,
+                translation_key="playback_settling",
+            )
+        if not self.configured:
+            raise ServiceValidationError(
+                translation_domain=DOMAIN, translation_key="not_configured"
+            )
+        self._dependency_issues = self._find_dependency_issues()
+        if self._dependency_issues:
+            raise ServiceValidationError(
+                translation_domain=DOMAIN,
+                translation_key="devices_unavailable",
+            )
+        if self.enabled and self._awaiting_playback_confirmation:
+            raise ServiceValidationError(
+                translation_domain=DOMAIN,
+                translation_key="playback_settling",
+            )
+
+    async def _async_started_active_level(
+        self, requested: SoothingLevel, now: datetime
+    ) -> None:
+        """Initialize a fresh session after leaving Standby."""
+        self._new_episode()
+        self._transition(
+            SootherState.SOOTHING,
+            Recommendation.NONE,
+            f"{requested.value} selected by parent",
+        )
+        await self._async_clear_notifications()
+        if self._physical_cry_is_on():
+            self._start_cry_episode(now, physical_active=True)
+            await self._async_evaluate_cry_evidence(now)
+
+    async def async_set_automatic(
+        self,
+        *,
+        enabled: bool,
+        expected_action_generation: int | None = None,
+    ) -> None:
+        """Enable or disable automatic upward level changes."""
+        async with self._lock:
+            self._ensure_started()
+            if (
+                expected_action_generation is not None
+                and expected_action_generation != self._action_generation
+            ):
+                return
+            requested = bool(enabled)
+            if requested is self.automatic:
+                return
+            self.settings.automatic_operation = requested
+            self._persist_settings()
+            now = dt_util.utcnow()
+            if self.enabled and self._incident_active and self._episode_confirmed:
+                self._reset_evidence_stage(now)
+                self._last_level_change_at = now
+                if requested:
+                    self._transition(
+                        SootherState.RESPONDING,
+                        Recommendation.OBSERVE,
+                        "automatic operation enabled during episode",
+                    )
+                    await self._async_clear_notifications()
+                    await self._async_evaluate_cry_evidence(now)
+                else:
+                    self._cancel_timer("evidence")
+                    self._transition(
+                        SootherState.RESPONDING,
+                        Recommendation.WAIT,
+                        "automatic operation disabled during episode",
+                    )
+                    await self._async_clear_notifications()
+                    await self._async_evaluate_cry_evidence(now)
+            else:
+                self._emit_update()
 
     async def async_set_volume(self, key: str, value: float) -> None:
         """Persist one volume setting after validating all relationships."""
@@ -467,7 +526,10 @@ class NurserySootherController:
             self._ensure_started()
             proposed = {
                 CONF_BASELINE_VOLUME: self.settings.baseline_volume,
-                CONF_BOOST_VOLUME: self.settings.boost_volume,
+                CONF_LEVEL_1_VOLUME: self.settings.level_1_volume,
+                CONF_LEVEL_2_VOLUME: self.settings.level_2_volume,
+                CONF_LEVEL_3_VOLUME: self.settings.level_3_volume,
+                CONF_LEVEL_4_VOLUME: self.settings.level_4_volume,
                 CONF_MAX_VOLUME: self.settings.max_volume,
             }
             if key not in proposed:
@@ -478,7 +540,10 @@ class NurserySootherController:
             if not (
                 0.0
                 <= proposed[CONF_BASELINE_VOLUME]
-                <= proposed[CONF_BOOST_VOLUME]
+                <= proposed[CONF_LEVEL_1_VOLUME]
+                <= proposed[CONF_LEVEL_2_VOLUME]
+                <= proposed[CONF_LEVEL_3_VOLUME]
+                <= proposed[CONF_LEVEL_4_VOLUME]
                 <= proposed[CONF_MAX_VOLUME]
                 <= MAX_VOLUME_PERCENT
             ):
@@ -487,33 +552,60 @@ class NurserySootherController:
                 )
 
             self.settings.baseline_volume = proposed[CONF_BASELINE_VOLUME]
-            self.settings.boost_volume = proposed[CONF_BOOST_VOLUME]
+            self.settings.level_1_volume = proposed[CONF_LEVEL_1_VOLUME]
+            self.settings.level_2_volume = proposed[CONF_LEVEL_2_VOLUME]
+            self.settings.level_3_volume = proposed[CONF_LEVEL_3_VOLUME]
+            self.settings.level_4_volume = proposed[CONF_LEVEL_4_VOLUME]
             self.settings.max_volume = proposed[CONF_MAX_VOLUME]
             self._persist_settings()
 
-            if self.enabled and self.dependencies_available and self._owns_playback:
-                target = (
-                    self.settings.boost_volume
-                    if self._boosted
-                    else self.settings.baseline_volume
+            if (
+                self.enabled
+                and self.dependencies_available
+                and self._owns_playback
+                and key == LEVEL_VOLUME_KEYS[self.level]
+            ):
+                await self._async_set_speaker_volume(
+                    self.settings.volume_for_level(self.level)
                 )
-                await self._async_set_speaker_volume(target)
             self._emit_update()
 
-    async def _async_recover_baseline(self) -> None:
-        """Recover safely without replaying a pre-restart boost."""
-        self._cancel_all_timers()
-        self._boosted = False
-        self._acknowledged = False
-        self._incident_active = False
-        self._transition(
-            SootherState.BASELINE, Recommendation.NONE, "fresh baseline recovery"
-        )
-        if not await self._async_ensure_playback():
+    async def _async_enter_standby(self, reason: str) -> None:
+        """Stop owned playback and make Standby the single off state."""
+        stopped = await self._async_stop_playback()
+        if not stopped:
+            self._transition(
+                SootherState.ATTENTION_REQUIRED,
+                Recommendation.CHECK_DEVICES,
+                "speaker stop failed",
+            )
+            await self._async_notify_dependency_problem()
             return
-        self._cry_input_active = self._cry_is_on()
-        if self._cry_input_active:
-            self._begin_cry_pending(new_episode=True)
+        self.settings.level = SoothingLevel.STANDBY
+        self._persist_settings()
+        self._new_episode()
+        self._transition(SootherState.STANDBY, Recommendation.START, reason)
+        await self._async_clear_notifications()
+
+    async def _async_apply_level(self, previous_media: dict[str, Any] | None) -> bool:
+        """Apply the current level, changing media only when its source differs."""
+        current_media = self._media_for_level(self.level)
+        if previous_media == current_media and self._owns_playback:
+            return await self._async_set_speaker_volume(
+                self.settings.volume_for_level(self.level)
+            )
+        if self._owns_playback and not await self._async_stop_playback():
+            return False
+        return await self._async_ensure_playback()
+
+    def _restore_level_after_failed_effect(self, previous_level: SoothingLevel) -> None:
+        """Publish a level consistent with the output left after a failed effect."""
+        self.settings.level = (
+            previous_level
+            if self._owns_playback and not self._playback_interrupted
+            else SoothingLevel.STANDBY
+        )
+        self._persist_settings()
 
     async def _async_state_changed(self, event: Event[EventStateChangedData]) -> None:
         """Handle cry, dependency, and continuous-playback state changes."""
@@ -539,38 +631,34 @@ class NurserySootherController:
                 return
 
             if entity_id == self.cry_sensor:
-                self._handle_cry_state_changed(event)
+                await self._async_handle_cry_state_changed(event)
             elif entity_id == self.media_player:
                 await self._async_handle_media_state_changed(event)
 
-    def _handle_cry_state_changed(self, event: Event[EventStateChangedData]) -> None:
-        """Handle only concrete cry state edges, not attribute updates."""
-        del event
-        synthetic_event_was_active = self._synthetic_cry_event_active
-        self._reconcile_cry_input()
-        if synthetic_event_was_active:
-            self._sync_real_cry_escalation()
-
-    def _reconcile_cry_input(self) -> None:
-        """Process one aggregate edge across physical and diagnostic inputs."""
-        cry_input_active = self._cry_is_on()
-        if cry_input_active == self._cry_input_active:
+    async def _async_handle_cry_state_changed(
+        self, event: Event[EventStateChangedData]
+    ) -> None:
+        """Convert only concrete binary-sensor edges into cry evidence."""
+        old_state = event.data.get("old_state")
+        new_state = event.data.get("new_state")
+        old_on = old_state is not None and old_state.state == STATE_ON
+        new_on = new_state is not None and new_state.state == STATE_ON
+        if old_on == new_on:
             return
-        self._cry_input_active = cry_input_active
-        if (
-            not self.enabled
-            or self._playback_interrupted
-            or not self.dependencies_available
-            or (
-                self.state is SootherState.ATTENTION_REQUIRED
-                and self.recommendation is Recommendation.CHECK_DEVICES
-            )
-        ):
-            return
-        if cry_input_active:
-            self._async_cry_started()
+        now = dt_util.utcnow()
+        if new_on:
+            if not self._incident_active:
+                self._start_cry_episode(now, physical_active=False)
+            if not self._evidence.record_on(now):
+                return
+            self._record_cry_activity(now)
         else:
-            self._async_cry_stopped()
+            if not self._incident_active:
+                return
+            if self._evidence.record_off(now) is None:
+                return
+            self._record_cry_activity(now)
+        await self._async_evaluate_cry_evidence(now)
 
     async def _async_handle_media_state_changed(
         self, event: Event[EventStateChangedData]
@@ -619,198 +707,303 @@ class NurserySootherController:
     ) -> bool:
         """Handle dependency loss/recovery and return whether it consumed the event."""
         if new_issues:
-            self._cancel_all_timers()
             if self.enabled:
-                if new_issues != old_issues:
-                    self._episode += 1
-                    self._acknowledged = False
-                if self._boosted and self._media_player_available():
-                    self._boosted = False
-                    if not await self._async_set_speaker_volume(
-                        self.settings.baseline_volume
-                    ):
-                        return True
-                self._transition(
-                    SootherState.ATTENTION_REQUIRED,
-                    Recommendation.CHECK_DEVICES,
-                    "dependency became unavailable",
-                )
-                if new_issues != old_issues:
-                    await self._async_notify_dependency_problem()
+                await self._async_handle_dependency_loss(old_issues, new_issues)
             return True
 
         if old_issues and self.enabled:
-            if self._owns_playback:
-                await self._async_playback_is_owned_now()
-            if self._playback_interrupted:
-                self._transition(
-                    SootherState.ATTENTION_REQUIRED,
-                    Recommendation.CHECK_DEVICES,
-                    "dependency recovered while speaker remained externally owned",
-                )
-                return True
-            await self._async_notify_recovery()
-            self._new_episode()
-            await self._async_recover_baseline()
+            await self._async_handle_dependency_recovery()
             return True
         return False
 
-    def _async_cry_started(self) -> None:
-        """Start or resume a debounced episode."""
-        settling_boost = (
-            self.state is SootherState.BOOST and self._cancel_settling is not None
+    async def _async_handle_dependency_loss(
+        self, old_issues: set[str], new_issues: set[str]
+    ) -> None:
+        """Pause policy and lower an active session to its safest level."""
+        self._cancel_all_timers()
+        self._incident_active = False
+        self._episode_confirmed = False
+        if new_issues != old_issues:
+            self._episode += 1
+        if self.level is not SoothingLevel.BASELINE:
+            previous_level = self.level
+            previous_media = self._media_for_level(previous_level)
+            self.settings.level = SoothingLevel.BASELINE
+            if (
+                self._media_player_available()
+                and self._owns_playback
+                and not await self._async_apply_level(previous_media)
+            ):
+                self._restore_level_after_failed_effect(previous_level)
+                return
+            self._persist_settings()
+        self._transition(
+            SootherState.ATTENTION_REQUIRED,
+            Recommendation.CHECK_DEVICES,
+            "dependency became unavailable",
         )
-        if self.state in {SootherState.BASELINE, SootherState.SETTLING} or (
-            settling_boost
-        ):
-            self._cancel_timer("settling")
-            self._begin_cry_pending(new_episode=self.state is SootherState.BASELINE)
+        if new_issues != old_issues:
+            await self._async_notify_dependency_problem()
 
-    def _async_cry_stopped(self) -> None:
-        """Cancel a false alarm or start uninterrupted-quiet settling."""
-        if self._cancel_debounce is not None and not self._incident_active:
-            self._cancel_timer("debounce")
+    async def _async_handle_dependency_recovery(self) -> None:
+        """Resume the selected safe level after all dependencies recover."""
+        if self._owns_playback:
+            await self._async_playback_is_owned_now()
+        if self._playback_interrupted:
             self._transition(
-                SootherState.BASELINE,
-                Recommendation.NONE,
-                "cry ended before debounce",
+                SootherState.ATTENTION_REQUIRED,
+                Recommendation.CHECK_DEVICES,
+                "dependency recovered while speaker remained externally owned",
+            )
+            return
+        await self._async_notify_recovery()
+        self._new_episode()
+        if not self._owns_playback and not await self._async_ensure_playback():
+            return
+        self._transition(
+            SootherState.SOOTHING,
+            Recommendation.NONE,
+            "dependencies recovered",
+        )
+        if self._physical_cry_is_on():
+            now = dt_util.utcnow()
+            self._start_cry_episode(now, physical_active=True)
+            await self._async_evaluate_cry_evidence(now)
+
+    def _start_cry_episode(self, now: datetime, *, physical_active: bool) -> None:
+        """Start one event episode without requiring a continuously-on sensor."""
+        self._new_episode()
+        self._incident_active = True
+        self._episode_confirmed = False
+        self._episode_started_at = now
+        self._confirmed_at = None
+        self._last_level_change_at = None
+        self._stage_simulated_events = 0
+        self._evidence.reset(now, active=physical_active)
+        self._transition(
+            SootherState.CRY_PENDING,
+            Recommendation.WAIT,
+            "cry episode started",
+        )
+        self._record_cry_activity(now)
+
+    def _record_cry_activity(self, now: datetime) -> None:
+        """Extend the event episode and restart its quiet clocks."""
+        self._last_cry_activity_at = now
+        self._schedule_cry_gap()
+        self._schedule_settling()
+
+    async def _async_evaluate_cry_evidence(self, now: datetime) -> None:
+        """Confirm or advance an episode once evidence and timing both allow it."""
+        if (
+            not self._started
+            or not self.enabled
+            or not self._incident_active
+            or not self.dependencies_available
+        ):
+            return
+        snapshot = self._evidence.snapshot(now)
+        evidence_ready = (
+            snapshot.events >= CRY_EVENT_THRESHOLD
+            or snapshot.active_seconds >= CRY_ACTIVE_SECONDS_THRESHOLD
+        )
+        gate_started_at = (
+            self._last_level_change_at
+            if self._episode_confirmed
+            else self._episode_started_at
+        )
+        gate_seconds = (
+            self.settings.level_up_seconds
+            if self._episode_confirmed
+            else self.settings.debounce_seconds
+        )
+        gate_remaining = (
+            max(0.0, gate_seconds - (now - gate_started_at).total_seconds())
+            if gate_started_at is not None
+            else float(gate_seconds)
+        )
+
+        if evidence_ready and gate_remaining <= 0:
+            self._cancel_timer("evidence")
+            simulated_only = (
+                snapshot.events > 0
+                and self._stage_simulated_events >= snapshot.events
+                and snapshot.active_seconds == 0
+            )
+            if not self._episode_confirmed:
+                self._episode_confirmed = True
+                self._confirmed_at = now
+                self._schedule_attention()
+            await self._async_handle_confirmed_evidence(
+                now, snapshot, simulated_only=simulated_only
             )
             return
 
-        if self.state in {
-            SootherState.CRY_PENDING,
-            SootherState.BOOST,
-            SootherState.ATTENTION_REQUIRED,
-        }:
-            self._cancel_timer("debounce")
-            self._cancel_timer("escalation")
+        delay: float | None = gate_remaining if evidence_ready else None
+        active_delay = self._evidence.seconds_until_active_threshold(
+            now, CRY_ACTIVE_SECONDS_THRESHOLD
+        )
+        if active_delay is not None:
+            held_delay = max(active_delay, gate_remaining)
+            delay = held_delay if delay is None else min(delay, held_delay)
+        if delay is not None:
+            self._schedule_evidence(max(delay, 0.001))
+        self._emit_update()
+
+    async def _async_handle_confirmed_evidence(
+        self,
+        now: datetime,
+        snapshot: EvidenceSnapshot,
+        *,
+        simulated_only: bool,
+    ) -> None:
+        """Raise one level automatically or send one exact manual suggestion."""
+        next_level = self.level.next_active()
+        if self.automatic and next_level is not None:
+            previous_level = self.level
+            previous_media = self._media_for_level(previous_level)
+            self.settings.level = next_level
+            if not await self._async_apply_level(previous_media):
+                self._restore_level_after_failed_effect(previous_level)
+                return
+            self._persist_settings()
+            self._last_level_change_at = now
             self._transition(
-                SootherState.SETTLING,
-                Recommendation.SETTLING,
-                "quiet period started",
+                SootherState.RESPONDING,
+                Recommendation.OBSERVE,
+                f"automatic increase to {next_level.value}",
             )
-            self._schedule_settling()
+            delivered = await self._async_notify_automatic_change(
+                next_level, snapshot, simulated_only=simulated_only
+            )
+        else:
+            recommendation = (
+                Recommendation.INCREASE_LEVEL
+                if next_level is not None
+                else Recommendation.ATTEND
+            )
+            self._transition(
+                SootherState.RESPONDING,
+                recommendation,
+                "manual cry recommendation"
+                if next_level is not None
+                else "crying continues at level 4",
+            )
+            delivered = await self._async_notify_cry(
+                snapshot, simulated_only=simulated_only
+            )
+        if not delivered:
+            await self._async_fail_safe_notification_delivery()
+            return
+        self._last_level_change_at = now
+        self._reset_evidence_stage(now)
+        self._evaluate_after_stage_reset(now)
 
-    def _begin_cry_pending(self, *, new_episode: bool) -> None:
-        """Enter cry pending and start a fresh debounce timer."""
-        if new_episode:
-            self._new_episode()
-            self._acknowledged = False
-            self._incident_active = False
+    async def _async_fail_safe_notification_delivery(self) -> None:
+        """Stop owned output when no caregiver notification can be delivered."""
+        self._cancel_all_timers()
+        stopped = await self._async_stop_playback()
+        self._new_episode()
+        if stopped:
+            self.settings.level = SoothingLevel.STANDBY
+            self._persist_settings()
         self._transition(
-            SootherState.CRY_PENDING, Recommendation.WAIT, "cry debounce started"
+            SootherState.ATTENTION_REQUIRED,
+            Recommendation.CHECK_DEVICES,
+            "all notification deliveries failed",
         )
-        self._schedule_debounce()
 
-    def _schedule_debounce(self) -> None:
-        """Schedule cry debounce with an episode generation guard."""
-        self._cancel_timer("debounce")
+    def _evaluate_after_stage_reset(self, now: datetime) -> None:
+        """Schedule held-sensor evidence after a stage consumes prior evidence."""
+        active_delay = self._evidence.seconds_until_active_threshold(
+            now, CRY_ACTIVE_SECONDS_THRESHOLD
+        )
+        if active_delay is not None:
+            self._schedule_evidence(
+                max(active_delay, float(self.settings.level_up_seconds), 0.001)
+            )
+
+    def _reset_evidence_stage(self, now: datetime) -> None:
+        """Require fresh post-response evidence before another recommendation."""
+        self._evidence.reset(now, active=self._physical_cry_is_on())
+        self._stage_simulated_events = 0
+        self._cancel_timer("evidence")
+
+    def _schedule_evidence(self, delay: float) -> None:
+        """Re-evaluate when a held pulse or timing gate can become eligible."""
+        self._cancel_timer("evidence")
         episode = self._episode
         cancel_callback: CALLBACK_TYPE | None = None
 
         async def _expired(now: datetime) -> None:
-            del now
             async with self._lock:
-                if self._cancel_debounce is not cancel_callback:
+                if self._cancel_evidence is not cancel_callback:
                     return
-                self._cancel_debounce = None
-                if (
-                    not self._started
-                    or episode != self._episode
-                    or not self.enabled
-                    or not self.dependencies_available
-                    or not self._cry_is_on()
-                ):
+                self._cancel_evidence = None
+                if episode != self._episode:
                     return
-                self._incident_active = True
-                recommendation = (
-                    Recommendation.ACKNOWLEDGED
-                    if self._acknowledged
-                    else Recommendation.OBSERVE
-                    if self._boosted
-                    else Recommendation.BOOST
-                )
-                state = (
-                    SootherState.BOOST if self._boosted else SootherState.CRY_PENDING
-                )
-                self._transition(state, recommendation, "cry debounce completed")
-                if not self._acknowledged:
-                    if await self._async_notify_cry():
-                        self._sync_real_cry_escalation()
-                    else:
-                        self._acknowledged = False
-                        self._transition(
-                            SootherState.ATTENTION_REQUIRED,
-                            Recommendation.CHECK_DEVICES,
-                            "all notification deliveries failed",
-                        )
+                await self._async_evaluate_cry_evidence(now)
 
-        cancel_callback = async_call_later(
-            self.hass, self.settings.debounce_seconds, _expired
-        )
-        self._cancel_debounce = cancel_callback
+        cancel_callback = async_call_later(self.hass, delay, _expired)
+        self._cancel_evidence = cancel_callback
 
-    def _schedule_escalation(self) -> None:
-        """Schedule the finite persistent-cry attention deadline."""
-        self._cancel_timer("escalation")
+    def _schedule_cry_gap(self) -> None:
+        """End an episode after no cry activity for the configured gap."""
+        self._cancel_timer("cry_gap")
         episode = self._episode
+        activity_at = self._last_cry_activity_at
         cancel_callback: CALLBACK_TYPE | None = None
 
         async def _expired(now: datetime) -> None:
-            del now
             async with self._lock:
-                if self._cancel_escalation is not cancel_callback:
+                if self._cancel_cry_gap is not cancel_callback:
                     return
-                self._cancel_escalation = None
+                self._cancel_cry_gap = None
                 if (
-                    not self._started
-                    or episode != self._episode
-                    or not self.enabled
-                    or not self.dependencies_available
-                    or not self._physical_cry_is_on()
-                    or self._acknowledged
+                    episode != self._episode
+                    or activity_at != self._last_cry_activity_at
+                    or not self._incident_active
                 ):
                     return
-                self._episode += 1
-                self._transition(
-                    SootherState.ATTENTION_REQUIRED,
-                    Recommendation.ATTEND,
-                    "persistent cry attention deadline",
-                )
-                await self._async_notify_attention()
+                if self._physical_cry_is_on():
+                    self._last_cry_activity_at = now
+                    self._schedule_cry_gap()
+                    self._schedule_settling()
+                    return
+                await self._async_finish_cry_gap(now, activity_at)
 
         cancel_callback = async_call_later(
-            self.hass, self.settings.escalation_seconds, _expired
+            self.hass, self.settings.cry_gap_seconds, _expired
         )
-        self._cancel_escalation = cancel_callback
+        self._cancel_cry_gap = cancel_callback
 
-    def _schedule_simulated_cry_event_release(self) -> None:
-        """Release one synthetic detection after it passes the real debounce."""
-        self._cancel_timer("simulated_cry_event")
-        cancel_callback: CALLBACK_TYPE | None = None
-
-        async def _expired(now: datetime) -> None:
-            del now
-            async with self._lock:
-                if self._cancel_simulated_cry_event is not cancel_callback:
-                    return
-                self._cancel_simulated_cry_event = None
-                if not self._started:
-                    return
-                self._synthetic_cry_event_active = False
-                self._reconcile_cry_input()
-                self._sync_real_cry_escalation()
-                self._emit_update()
-
-        cancel_callback = async_call_later(
-            self.hass,
-            self.settings.debounce_seconds + SIMULATED_CRY_EVENT_RELEASE_GRACE_SECONDS,
-            _expired,
+    async def _async_finish_cry_gap(
+        self, now: datetime, activity_at: datetime | None
+    ) -> None:
+        """Resolve an episode as quiet, including exact deadline ties."""
+        self._cancel_timer("cry_gap")
+        self._incident_active = False
+        self._episode_confirmed = False
+        self._cancel_timer("evidence")
+        self._cancel_timer("attention")
+        self._episode += 1
+        self._evidence.reset(now)
+        self._stage_simulated_events = 0
+        self._transition(
+            SootherState.SETTLING,
+            Recommendation.SETTLING,
+            "cry event gap elapsed",
         )
-        self._cancel_simulated_cry_event = cancel_callback
+        elapsed_quiet = (
+            (now - activity_at).total_seconds() if activity_at is not None else 0.0
+        )
+        self._schedule_settling(
+            max(0.001, self.settings.settling_seconds - elapsed_quiet)
+        )
+        await self._async_clear_notifications()
 
-    def _schedule_settling(self) -> None:
-        """Schedule an automatic baseline after uninterrupted quiet."""
+    def _schedule_settling(self, delay: float | None = None) -> None:
+        """Step down exactly one level after uninterrupted quiet."""
         self._cancel_timer("settling")
         episode = self._episode
         cancel_callback: CALLBACK_TYPE | None = None
@@ -822,88 +1015,107 @@ class NurserySootherController:
                     return
                 self._cancel_settling = None
                 if (
-                    not self._started
-                    or episode != self._episode
+                    episode != self._episode
+                    or not self._started
                     or not self.enabled
                     or not self.dependencies_available
-                    or not self._owns_playback
-                    or self._cry_is_on()
+                    or self._incident_active
+                    or self._physical_cry_is_on()
                 ):
                     return
-                self._boosted = False
-                if await self._async_playback_is_owned_now():
-                    if not await self._async_set_speaker_volume(
-                        self.settings.baseline_volume
-                    ):
-                        return
-                elif self._owns_playback and not self._playback_interrupted:
-                    if not await self._async_ensure_playback():
-                        return
-                else:
+                previous_level = self.level
+                lower_level = previous_level.previous_active()
+                if lower_level is None:
+                    self._transition(
+                        SootherState.SOOTHING,
+                        Recommendation.NONE,
+                        "quiet at baseline",
+                    )
+                    await self._async_clear_notifications()
                     return
-                self._acknowledged = False
-                self._incident_active = False
+                previous_media = self._media_for_level(previous_level)
+                self.settings.level = lower_level
+                if not await self._async_apply_level(previous_media):
+                    self._restore_level_after_failed_effect(previous_level)
+                    return
+                self._persist_settings()
+                if lower_level is SoothingLevel.BASELINE:
+                    self._transition(
+                        SootherState.SOOTHING,
+                        Recommendation.NONE,
+                        "quiet settling reached baseline",
+                    )
+                    await self._async_clear_notifications()
+                    return
                 self._transition(
-                    SootherState.BASELINE,
-                    Recommendation.NONE,
-                    "quiet settling completed",
+                    SootherState.SETTLING,
+                    Recommendation.SETTLING,
+                    f"quiet settling lowered to {lower_level.value}",
                 )
-                await self._async_clear_notifications()
-                self._episode += 1
+                self._schedule_settling()
 
         cancel_callback = async_call_later(
-            self.hass, self.settings.settling_seconds, _expired
+            self.hass,
+            self.settings.settling_seconds if delay is None else delay,
+            _expired,
         )
         self._cancel_settling = cancel_callback
 
-    def _sync_real_cry_escalation(self) -> None:
-        """Run attention timing only while confirmed physical crying persists."""
-        if not self._physical_cry_is_on():
-            if self._synthetic_cry_event_active:
-                self._cancel_timer("escalation")
-            return
-        if (
-            not self._incident_active
-            or self._acknowledged
-            or self._cancel_escalation is not None
-            or self.state not in {SootherState.CRY_PENDING, SootherState.BOOST}
-        ):
-            return
-        self._schedule_escalation()
-
-    def _schedule_cooldown_expiry(
-        self, now: datetime, previous_recommendation: Recommendation
-    ) -> None:
-        """Restore the prior recommendation when the cooldown becomes eligible."""
-        if self._cancel_cooldown is not None or self._last_boost_at is None:
-            return
-        accepted_boost_at = self._last_boost_at
-        remaining = max(
-            0.0,
-            self.settings.cooldown_seconds - (now - accepted_boost_at).total_seconds(),
-        )
+    def _schedule_attention(self) -> None:
+        """Stop soothing and alert a parent at the fixed episode deadline."""
+        self._cancel_timer("attention")
+        episode = self._episode
+        confirmed_at = self._confirmed_at
         cancel_callback: CALLBACK_TYPE | None = None
 
-        async def _expired(expired_at: datetime) -> None:
-            del expired_at
+        async def _expired(now: datetime) -> None:
             async with self._lock:
-                if self._cancel_cooldown is not cancel_callback:
+                if self._cancel_attention is not cancel_callback:
                     return
-                self._cancel_cooldown = None
+                self._cancel_attention = None
                 if (
-                    not self._started
-                    or self._last_boost_at != accepted_boost_at
-                    or self.recommendation is not Recommendation.COOLDOWN
+                    episode != self._episode
+                    or confirmed_at != self._confirmed_at
+                    or not self.enabled
+                    or not self._incident_active
+                    or not self._episode_confirmed
                 ):
                     return
+                activity_at = self._last_cry_activity_at
+                if (
+                    activity_at is not None
+                    and not self._physical_cry_is_on()
+                    and (now - activity_at).total_seconds()
+                    >= self.settings.cry_gap_seconds
+                ):
+                    await self._async_finish_cry_gap(now, activity_at)
+                    return
+                stopped = await self._async_stop_playback()
+                if not stopped:
+                    self._transition(
+                        SootherState.ATTENTION_REQUIRED,
+                        Recommendation.CHECK_DEVICES,
+                        "attention timeout could not stop speaker",
+                    )
+                    await self._async_notify_dependency_problem()
+                    return
+                self.settings.level = SoothingLevel.STANDBY
+                self._persist_settings()
+                self._episode += 1
+                self._cancel_all_timers()
+                self._incident_active = False
+                self._episode_confirmed = False
                 self._transition(
-                    self.state,
-                    previous_recommendation,
-                    "boost cooldown elapsed",
+                    SootherState.ATTENTION_REQUIRED,
+                    Recommendation.ATTEND,
+                    "persistent cry attention deadline",
                 )
+                await self._async_notify_attention()
 
-        cancel_callback = async_call_later(self.hass, remaining, _expired)
-        self._cancel_cooldown = cancel_callback
+        cancel_callback = async_call_later(
+            self.hass, self.settings.attention_seconds, _expired
+        )
+        self._cancel_attention = cancel_callback
 
     async def _async_notification_action(self, event: Event[dict[str, Any]]) -> None:
         """Accept only current actions belonging to this entry and episode."""
@@ -912,16 +1124,22 @@ class NurserySootherController:
         parsed_action = self._parse_notification_action(event.data.get("action"))
         if parsed_action is None:
             return
-        episode, command = parsed_action
+        action_generation, command = parsed_action
 
-        if command == ACTION_BOOST:
-            await self.async_boost(expected_episode=episode)
-        elif command == ACTION_BASELINE:
-            await self.async_baseline(expected_episode=episode)
-        elif command == ACTION_ACKNOWLEDGE:
-            await self.async_acknowledge(expected_episode=episode)
-        elif command == ACTION_STOP:
-            await self.async_stop(expected_episode=episode)
+        level_prefix = f"{ACTION_SET_LEVEL}="
+        if command.startswith(level_prefix):
+            try:
+                level = SoothingLevel(command.removeprefix(level_prefix))
+            except ValueError:
+                return
+            await self.async_set_level(
+                level, expected_action_generation=action_generation
+            )
+        elif command == ACTION_SET_MANUAL:
+            await self.async_set_automatic(
+                enabled=False,
+                expected_action_generation=action_generation,
+            )
 
     def _parse_notification_action(self, action: object) -> tuple[int, str] | None:
         """Authenticate and parse an action from this runtime session."""
@@ -937,113 +1155,143 @@ class NurserySootherController:
         if len(parts) != action_id_parts:
             return None
         try:
-            episode = int(parts[3])
+            action_generation = int(parts[3])
         except ValueError:
             return None
-        if episode != self._episode:
+        if action_generation != self._action_generation:
             return None
-        return episode, parts[4]
+        return action_generation, parts[4]
 
     def _notification_action(self, command: str) -> str:
         """Build an action identifier unique to the current episode."""
         return (
             f"{NOTIFICATION_ACTION_PREFIX}:{self.entry.entry_id}:"
-            f"{self._session_id}:{self._episode}:{command}"
+            f"{self._session_id}:{self._action_generation}:{command}"
         )
 
-    async def _async_notify_cry(self) -> bool:
-        """Suggest the single parent-authorized boost to every parent."""
-        simulated_only = (
-            self._synthetic_cry_event_active and not self._physical_cry_is_on()
+    async def _async_notify_cry(
+        self, snapshot: EvidenceSnapshot, *, simulated_only: bool
+    ) -> bool:
+        """Explain the evidence and suggest one exact next manual level."""
+        self._action_generation += 1
+        next_level = self.level.next_active()
+        prefix = "[Test] Simulated " if simulated_only else ""
+        evidence = (
+            f"{snapshot.events} cry events and "
+            f"{snapshot.active_seconds:.1f} detected seconds in "
+            f"{self.settings.evidence_window_seconds} seconds"
         )
-        if self._boosted:
+        if next_level is None:
             message = (
-                "[Test] A simulated cry event arrived while the boost is active. "
-                "Keep observing the nursery."
-                if simulated_only
-                else (
-                    "Crying continues while the boost is active. "
-                    "Keep observing the nursery."
-                )
+                f"{prefix}cry evidence: {evidence}. The soother is already at "
+                "Level 4; please check the nursery."
             )
-            return await self._async_notify(
-                message,
-                [
-                    self._action(ACTION_BASELINE, "Baseline"),
-                    self._action(ACTION_ACKNOWLEDGE, "Acknowledge"),
-                    self._action(ACTION_STOP, "Stop"),
-                ],
-                include_camera=True,
+            actions = [self._level_action(SoothingLevel.STANDBY)]
+        else:
+            message = (
+                f"{prefix}cry evidence: {evidence}. Current level is "
+                f"{self._level_title(self.level)}; consider "
+                f"{self._level_title(next_level)}."
             )
-        message = (
-            "[Test] Simulated cry event received. Consider a small white-noise boost."
-            if simulated_only
-            else (
-                "Crying detected after the debounce period. "
-                "Consider a small white-noise boost."
-            )
-        )
+            actions = [
+                self._level_action(next_level),
+                self._level_action(SoothingLevel.STANDBY),
+            ]
+        return await self._async_notify(message, actions, include_camera=True)
+
+    async def _async_notify_automatic_change(
+        self,
+        level: SoothingLevel,
+        snapshot: EvidenceSnapshot,
+        *,
+        simulated_only: bool,
+    ) -> bool:
+        """Report one evidence-authorized automatic level change."""
+        self._action_generation += 1
+        prefix = "[Test] Simulated " if simulated_only else ""
         return await self._async_notify(
-            message,
+            (
+                f"{prefix}cry evidence ({snapshot.events} events, "
+                f"{snapshot.active_seconds:.1f} detected seconds) increased "
+                f"Nursery Soother to {self._level_title(level)}."
+            ),
             [
-                self._action(ACTION_BOOST, "Boost"),
-                self._action(ACTION_BASELINE, "Baseline"),
-                self._action(ACTION_ACKNOWLEDGE, "Acknowledge"),
+                self._action(ACTION_SET_MANUAL, "Use manual operation"),
+                self._level_action(SoothingLevel.STANDBY),
             ],
             include_camera=True,
         )
 
     async def _async_notify_attention(self) -> None:
         """Ask a parent to attend after the finite response window."""
+        self._action_generation += 1
         await self._async_notify(
-            "Crying is continuing. Please check the nursery.",
+            (
+                "Crying continued for the full response window. Nursery Soother "
+                "is now in Standby; please check the nursery."
+            ),
             [
-                self._action(ACTION_ACKNOWLEDGE, "Acknowledge"),
-                self._action(ACTION_BASELINE, "Baseline"),
-                self._action(ACTION_STOP, "Stop"),
+                self._level_action(SoothingLevel.BASELINE),
             ],
             include_camera=True,
         )
 
     async def _async_notify_dependency_problem(self) -> None:
         """Notify parents once when a selected dependency becomes unavailable."""
+        self._action_generation += 1
         await self._async_notify(
             (
                 "A nursery camera, cry sensor, speaker, or parent notification "
-                "action is unavailable. Automatic response is paused."
+                "action is unavailable. Cry response is paused at a safe level."
             ),
-            [
-                self._action(ACTION_ACKNOWLEDGE, "Acknowledge"),
-                self._action(ACTION_STOP, "Stop"),
-            ],
+            [self._level_action(SoothingLevel.STANDBY)] if self.enabled else [],
             include_camera=False,
         )
 
     async def _async_notify_recovery(self) -> None:
         """Replace the dependency alert after recovery."""
+        self._action_generation += 1
         await self._async_notify(
-            "Nursery devices are available again. Restarting safely at baseline.",
+            f"Nursery devices are available again at {self._level_title(self.level)}.",
             [],
             include_camera=False,
         )
 
     async def _async_notify_playback_replaced(self) -> None:
         """Tell parents that external speaker use paused the response loop."""
+        self._action_generation += 1
         await self._async_notify(
             (
-                "The nursery speaker started playing different media. Nursery "
-                "Soother is paused; stop it and enable it again to resume."
+                "The nursery speaker was already active or started playing "
+                "outside this soothing session. Nursery Soother moved to Standby "
+                "without touching that media. Select an active level to start it "
+                "again."
             ),
-            [
-                self._action(ACTION_ACKNOWLEDGE, "Acknowledge"),
-                self._action(ACTION_STOP, "Stop"),
-            ],
+            [self._level_action(SoothingLevel.BASELINE)],
             include_camera=False,
         )
 
     def _action(self, command: str, title: str) -> dict[str, str]:
         """Build one actionable-notification button."""
         return {"action": self._notification_action(command), "title": title}
+
+    def _level_action(self, level: SoothingLevel) -> dict[str, str]:
+        """Build an action selecting one exact soothing level."""
+        return self._action(
+            f"{ACTION_SET_LEVEL}={level.value}", self._level_title(level)
+        )
+
+    @staticmethod
+    def _level_title(level: SoothingLevel) -> str:
+        """Return the parent-facing title for one level."""
+        return {
+            SoothingLevel.STANDBY: "Standby",
+            SoothingLevel.BASELINE: "Baseline",
+            SoothingLevel.LEVEL_1: "Level 1",
+            SoothingLevel.LEVEL_2: "Level 2",
+            SoothingLevel.LEVEL_3: "Level 3",
+            SoothingLevel.LEVEL_4: "Level 4",
+        }[level]
 
     async def _async_notify(
         self,
@@ -1084,6 +1332,7 @@ class NurserySootherController:
 
     async def _async_clear_notifications(self) -> None:
         """Clear the shared incident on both parents' devices."""
+        self._action_generation += 1
         if not self.configured:
             return
         payload = {
@@ -1121,18 +1370,18 @@ class NurserySootherController:
     async def _async_ensure_playback(self) -> bool:
         """Set a capped current volume and start the configured media."""
         media_player = self.media_player
-        if media_player is None or not self._entity_available(media_player):
+        if (
+            not self.enabled
+            or media_player is None
+            or not self._entity_available(media_player)
+        ):
             return False
-        target = (
-            self.settings.boost_volume
-            if self._boosted
-            else self.settings.baseline_volume
-        )
+        target = self.settings.volume_for_level(self.level)
         if not await self._async_set_speaker_volume(target, require_owned=False):
             self._playback_interrupted = True
             return False
 
-        media = self.white_noise
+        media = self._media_for_level(self.level)
         if media is None:
             return False
         play_context = Context()
@@ -1149,7 +1398,9 @@ class NurserySootherController:
             },
             context=play_context,
         ):
-            self._track_failed_play_context(play_context.id)
+            self._track_failed_play_context(
+                play_context.id, media[ATTR_MEDIA_CONTENT_ID]
+            )
             self._awaiting_playback_confirmation = False
             self._pending_play_context_id = None
             media_state = self.hass.states.get(media_player)
@@ -1212,7 +1463,9 @@ class NurserySootherController:
             {ATTR_MEDIA_VOLUME_LEVEL: safe_percent / 100.0},
         )
 
-    async def _async_playback_is_owned_now(self) -> bool:
+    async def _async_playback_is_owned_now(
+        self, *, notify_interruption: bool = True
+    ) -> bool:
         """Reconcile live speaker state immediately before a volume effect."""
         if not self._owns_playback or self.media_player is None:
             return False
@@ -1243,7 +1496,7 @@ class NurserySootherController:
             return True
 
         self._relinquish_playback()
-        await self._async_finalize_playback_interruption()
+        await self._async_finalize_playback_interruption(notify=notify_interruption)
         return False
 
     async def _async_compensate_failed_play(
@@ -1269,11 +1522,16 @@ class NurserySootherController:
             else None
         )
         current_content_id = new_state.attributes.get(ATTR_MEDIA_CONTENT_ID)
+        failed_media_content_id = self._failed_play_media_content_ids.get(
+            failed_context_id
+        )
         if (
             new_state is live_state
             and new_state.state
             in {MediaPlayerState.PLAYING, MediaPlayerState.BUFFERING}
-            and self._media_content_id_matches_configured(current_content_id)
+            and self._media_content_ids_match(
+                current_content_id, failed_media_content_id
+            )
         ):
             self._clear_failed_play_context(failed_context_id)
             self._owns_playback = True
@@ -1288,11 +1546,15 @@ class NurserySootherController:
                 await self._async_notify_dependency_problem()
         return True
 
-    def _track_failed_play_context(self, context_id: str) -> None:
+    def _track_failed_play_context(
+        self, context_id: str, media_content_id: object
+    ) -> None:
         """Monitor an ambiguous failed play for a bounded compensation window."""
         if context_id in self._failed_play_context_ids:
             return
         self._failed_play_context_ids.add(context_id)
+        if isinstance(media_content_id, str):
+            self._failed_play_media_content_ids[context_id] = media_content_id
         cancel_callback: CALLBACK_TYPE | None = None
 
         async def _expired(now: datetime) -> None:
@@ -1302,6 +1564,7 @@ class NurserySootherController:
                     return
                 self._failed_play_expiries.pop(context_id, None)
                 self._failed_play_context_ids.discard(context_id)
+                self._failed_play_media_content_ids.pop(context_id, None)
                 self._emit_update()
 
         cancel_callback = async_call_later(
@@ -1312,22 +1575,29 @@ class NurserySootherController:
     def _clear_failed_play_context(self, context_id: str) -> None:
         """Finish monitoring one failed play context."""
         self._failed_play_context_ids.discard(context_id)
+        self._failed_play_media_content_ids.pop(context_id, None)
         if cancel_callback := self._failed_play_expiries.pop(context_id, None):
             cancel_callback()
 
-    async def _async_finalize_playback_interruption(self) -> None:
+    async def _async_finalize_playback_interruption(
+        self, *, notify: bool = True
+    ) -> None:
         """Expose a detected external takeover without touching its audio."""
         self._cancel_all_timers()
         self._episode += 1
-        self._boosted = False
-        self._acknowledged = False
         self._incident_active = False
+        self._episode_confirmed = False
+        self.settings.level = SoothingLevel.STANDBY
+        self._persist_settings()
         self._transition(
             SootherState.ATTENTION_REQUIRED,
             Recommendation.CHECK_DEVICES,
             "speaker playback replaced externally",
         )
-        await self._async_notify_playback_replaced()
+        if notify:
+            await self._async_notify_playback_replaced()
+        else:
+            self._action_generation += 1
 
     async def _async_stop_playback(self) -> bool:
         """Stop or pause only playback started by this controller."""
@@ -1380,7 +1650,10 @@ class NurserySootherController:
             )
             if not should_stop:
                 if self._pending_play_context_id is not None:
-                    self._track_failed_play_context(self._pending_play_context_id)
+                    self._track_failed_play_context(
+                        self._pending_play_context_id,
+                        self._configured_media_content_id(),
+                    )
                 self._clear_playback_ownership()
             return should_stop
         should_stop = current_content_id is None and self._state_has_play_context(
@@ -1444,7 +1717,10 @@ class NurserySootherController:
         new_state = event.data.get("new_state")
         if new_state is not None:
             new_content_id = new_state.attributes.get(ATTR_MEDIA_CONTENT_ID)
-            if self._media_content_id_matches_configured(new_content_id):
+            if self._media_content_id_matches_configured(new_content_id) and (
+                new_state.context.user_id is None
+                or self._state_has_play_context(new_state, self._owned_play_context_id)
+            ):
                 self._adopt_owned_media_content_id(new_content_id)
                 return False
         replaced = (
@@ -1501,11 +1777,18 @@ class NurserySootherController:
         )
 
     def _configured_media_content_id(self) -> str | None:
-        """Return the configured source identifier when available."""
-        if self.white_noise is None:
+        """Return the source identifier for the selected active level."""
+        media = self._media_for_level(self.level)
+        if media is None:
             return None
-        content_id = self.white_noise.get(ATTR_MEDIA_CONTENT_ID)
+        content_id = media.get(ATTR_MEDIA_CONTENT_ID)
         return content_id if isinstance(content_id, str) else None
+
+    def _media_for_level(self, level: SoothingLevel) -> dict[str, Any] | None:
+        """Return the configured media mapping for one active level."""
+        if level is SoothingLevel.STANDBY:
+            return None
+        return self.sounds.get(level)
 
     def _media_content_id_matches_configured(
         self, media_content_id: object
@@ -1519,14 +1802,12 @@ class NurserySootherController:
         self, media_state: State, media_content_id: object
     ) -> bool:
         """Match owned media unless a user explicitly supplied a fresh raw ID."""
-        owned_content_id = self._owned_media_content_id
-        if not self._media_content_ids_match(media_content_id, owned_content_id):
+        if media_state.context.user_id is not None and not self._state_has_play_context(
+            media_state, self._owned_play_context_id
+        ):
             return False
-        return not (
-            isinstance(media_content_id, str)
-            and media_content_id != owned_content_id
-            and media_state.context.user_id is not None
-        )
+        owned_content_id = self._owned_media_content_id
+        return self._media_content_ids_match(media_content_id, owned_content_id)
 
     def _media_content_ids_match(self, first: object, second: object) -> bool:
         """Compare raw IDs or stable identities for HA-hosted local media."""
@@ -1625,7 +1906,8 @@ class NurserySootherController:
             if not critical:
                 return False
             self._cancel_all_timers()
-            self._acknowledged = False
+            self._incident_active = False
+            self._episode_confirmed = False
             self._transition(
                 SootherState.ATTENTION_REQUIRED,
                 Recommendation.CHECK_DEVICES,
@@ -1694,11 +1976,15 @@ class NurserySootherController:
             self.media_player
         )
 
-    def _cry_is_on(self) -> bool:
-        """Return whether the cry input is explicitly on."""
-        if self._synthetic_cry_event_active:
-            return True
-        return self._physical_cry_is_on()
+    def _media_player_is_active(self) -> bool:
+        """Return whether startup would overwrite an already-active speaker."""
+        if self.media_player is None:
+            return False
+        state = self.hass.states.get(self.media_player)
+        return state is not None and state.state in {
+            MediaPlayerState.PLAYING,
+            MediaPlayerState.BUFFERING,
+        }
 
     def _physical_cry_is_on(self) -> bool:
         """Return whether the configured cry binary sensor is explicitly on."""
@@ -1717,7 +2003,7 @@ class NurserySootherController:
         self._ensure_started()
         if not self.enabled:
             raise ServiceValidationError(
-                translation_domain=DOMAIN, translation_key="disabled"
+                translation_domain=DOMAIN, translation_key="standby"
             )
         if not self.configured:
             raise ServiceValidationError(
@@ -1746,24 +2032,23 @@ class NurserySootherController:
     def _new_episode(self) -> None:
         """Invalidate stale timers and phone actions."""
         self._episode += 1
+        self._action_generation += 1
         self._cancel_all_timers()
-        self._acknowledged = False
         self._incident_active = False
+        self._episode_confirmed = False
+        self._episode_started_at = None
+        self._confirmed_at = None
+        self._last_cry_activity_at = None
+        self._last_level_change_at = None
+        self._stage_simulated_events = 0
+        self._evidence.reset(dt_util.utcnow())
 
     def _cancel_all_timers(self) -> None:
         """Cancel all response timers."""
-        self._cancel_timer("debounce")
-        self._cancel_timer("cooldown")
-        self._cancel_timer("escalation")
-        self._cancel_timer("simulated_cry_event")
+        self._cancel_timer("evidence")
+        self._cancel_timer("cry_gap")
         self._cancel_timer("settling")
-        self._synthetic_cry_event_active = False
-        self._cry_input_active = self._physical_cry_is_on()
-
-    def _reset_boost_cooldown(self) -> None:
-        """Start a fresh parent-controlled baseline or enabled session."""
-        self._last_boost_at = None
-        self._cancel_timer("cooldown")
+        self._cancel_timer("attention")
 
     def _cancel_timer(self, timer: str) -> None:
         """Cancel one named response timer."""
@@ -1786,8 +2071,6 @@ class NurserySootherController:
         reason: str,
     ) -> None:
         """Apply one state transition and notify every entity."""
-        if recommendation is not Recommendation.COOLDOWN:
-            self._cancel_timer("cooldown")
         self.state = state
         self.recommendation = recommendation
         self._last_reason = reason

@@ -29,25 +29,33 @@ from homeassistant.helpers.selector import (
 )
 
 from .const import (
+    CONF_ATTENTION_SECONDS,
+    CONF_AUTOMATIC_OPERATION,
     CONF_BASELINE_VOLUME,
-    CONF_BOOST_VOLUME,
-    CONF_COOLDOWN_SECONDS,
+    CONF_CRY_GAP_SECONDS,
     CONF_DEBOUNCE_SECONDS,
-    CONF_ENABLED,
-    CONF_ESCALATION_SECONDS,
+    CONF_EVIDENCE_WINDOW_SECONDS,
+    CONF_LEVEL,
+    CONF_LEVEL_1_VOLUME,
+    CONF_LEVEL_2_VOLUME,
+    CONF_LEVEL_3_VOLUME,
+    CONF_LEVEL_4_VOLUME,
+    CONF_LEVEL_UP_SECONDS,
     CONF_MAX_VOLUME,
     CONF_MEDIA_PLAYER,
     CONF_NOTIFY_TARGETS,
     CONF_SETTLING_SECONDS,
-    CONF_WHITE_NOISE,
-    DEFAULT_ENABLED,
+    CONF_SOOTHING_SOUND,
+    CONF_SOUNDS,
+    DEFAULT_AUTOMATIC_OPERATION,
+    DEFAULT_LEVEL,
     DEFAULT_OPTIONS,
     DOMAIN,
     ENTITY_DOMAINS,
     ENTRY_VERSION,
     NAME,
 )
-from .models import SootherSettings
+from .models import ACTIVE_LEVELS, SootherSettings, SoothingLevel
 
 if TYPE_CHECKING:
     from homeassistant.config_entries import ConfigEntry
@@ -62,14 +70,19 @@ _STOP_MEDIA_PLAYER_FEATURES = (
 _NOTIFY_ACTION_PREFIX = "notify.mobile_app_"
 _VOLUME_KEYS = (
     CONF_BASELINE_VOLUME,
-    CONF_BOOST_VOLUME,
+    CONF_LEVEL_1_VOLUME,
+    CONF_LEVEL_2_VOLUME,
+    CONF_LEVEL_3_VOLUME,
+    CONF_LEVEL_4_VOLUME,
     CONF_MAX_VOLUME,
 )
 _TIMER_KEYS = (
     CONF_DEBOUNCE_SECONDS,
-    CONF_COOLDOWN_SECONDS,
+    CONF_EVIDENCE_WINDOW_SECONDS,
+    CONF_CRY_GAP_SECONDS,
+    CONF_LEVEL_UP_SECONDS,
     CONF_SETTLING_SECONDS,
-    CONF_ESCALATION_SECONDS,
+    CONF_ATTENTION_SECONDS,
 )
 
 _VOLUME_SELECTOR = NumberSelector(
@@ -95,15 +108,37 @@ BEHAVIOR_SCHEMA = vol.Schema(
 )
 
 
-def _media_validation_error(media: dict[str, str]) -> str | None:
+def _media_validation_error(media: object) -> str | None:
     """Return a translated error key for an unsafe media selection."""
-    if not media["media_content_id"].strip() or not media[
-        "media_content_type"
-    ].startswith("audio/"):
+    if not isinstance(media, dict):
         return "invalid_audio_media"
-    if not media["media_content_id"].startswith("media-source://media_source/"):
+    content_id = media.get("media_content_id")
+    content_type = media.get("media_content_type")
+    if (
+        not isinstance(content_id, str)
+        or not content_id.strip()
+        or not isinstance(content_type, str)
+        or not content_type.startswith("audio/")
+    ):
+        return "invalid_audio_media"
+    if not content_id.startswith("media-source://media_source/local/"):
         return "invalid_local_audio_media"
     return None
+
+
+def sounds_are_valid(sounds: object) -> bool:
+    """Return whether every active level has one safe local audio mapping."""
+    if not isinstance(sounds, dict):
+        return False
+    expected_keys = {level.value for level in ACTIVE_LEVELS}
+    return set(sounds) == expected_keys and all(
+        _media_validation_error(sounds[level]) is None for level in expected_keys
+    )
+
+
+def _sounds_from_media(media: dict[str, str]) -> dict[str, dict[str, str]]:
+    """Build independent per-level mappings from the initial shared sound."""
+    return {level.value: dict(media) for level in ACTIVE_LEVELS}
 
 
 def _stable_data_schema(hass: HomeAssistant) -> vol.Schema:
@@ -121,7 +156,7 @@ def _stable_data_schema(hass: HomeAssistant) -> vol.Schema:
             for config_key, expected_domain in ENTITY_DOMAINS.items()
         }
         | {
-            vol.Required(CONF_WHITE_NOISE): MediaSelector(
+            vol.Required(CONF_SOOTHING_SOUND): MediaSelector(
                 MediaSelectorConfig(accept=["audio/*"])
             ),
             vol.Required(CONF_NOTIFY_TARGETS): SelectSelector(
@@ -134,6 +169,17 @@ def _stable_data_schema(hass: HomeAssistant) -> vol.Schema:
             ),
         }
     )
+
+
+def _stable_suggested_values(data: dict[str, Any]) -> dict[str, Any]:
+    """Translate stored per-level sounds back to the current shared selector."""
+    suggested = {key: value for key, value in data.items() if key != CONF_SOUNDS}
+    sounds = data.get(CONF_SOUNDS)
+    if isinstance(sounds, dict):
+        baseline = sounds.get(SoothingLevel.BASELINE.value)
+        if isinstance(baseline, dict):
+            suggested[CONF_SOOTHING_SOUND] = baseline
+    return suggested
 
 
 def _normalize_stable_data(
@@ -176,11 +222,12 @@ def _normalize_stable_data(
 
         normalized_data[config_key] = entity_id
 
-    media = user_input[CONF_WHITE_NOISE]
+    media = user_input[CONF_SOOTHING_SOUND]
     if media_error := _media_validation_error(media):
-        errors[CONF_WHITE_NOISE] = media_error
+        errors[CONF_SOOTHING_SOUND] = media_error
     else:
-        normalized_data[CONF_WHITE_NOISE] = media
+        normalized_data[CONF_SOUNDS] = _sounds_from_media(media)
+
     normalized_targets, target_error = _normalize_notify_targets(
         hass, user_input[CONF_NOTIFY_TARGETS]
     )
@@ -237,10 +284,13 @@ def _find_entry_conflicts(
 
 
 def _normalize_behavior(
-    user_input: dict[str, Any], *, enabled: bool
-) -> tuple[dict[str, float | int | bool], dict[str, str]]:
+    user_input: dict[str, Any],
+    *,
+    level: str,
+    automatic_operation: bool,
+) -> tuple[dict[str, float | int | bool | str], dict[str, str]]:
     """Validate behavior values and return their persisted representation."""
-    normalized: dict[str, float | int | bool] = {
+    normalized: dict[str, float | int | bool | str] = {
         config_key: float(user_input[config_key]) for config_key in _VOLUME_KEYS
     }
     errors: dict[str, str] = {}
@@ -252,14 +302,15 @@ def _normalize_behavior(
             continue
         normalized[config_key] = int(value)
 
+    normalized[CONF_LEVEL] = level
+    normalized[CONF_AUTOMATIC_OPERATION] = automatic_operation
     if errors:
         return normalized, errors
 
-    settings = SootherSettings.from_options(normalized | {CONF_ENABLED: enabled})
+    settings = SootherSettings.from_options(normalized)
     if not settings.volumes_are_valid():
         errors["base"] = "invalid_volume_configuration"
 
-    normalized[CONF_ENABLED] = enabled
     return normalized, errors
 
 
@@ -303,10 +354,14 @@ class NurserySootherConfigFlow(ConfigFlow, domain=DOMAIN):
     async def async_step_behavior(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
-        """Collect safe initial behavior settings."""
+        """Collect safe initial level and evidence policy settings."""
         errors: dict[str, str] = {}
         if user_input is not None:
-            options, errors = _normalize_behavior(user_input, enabled=DEFAULT_ENABLED)
+            options, errors = _normalize_behavior(
+                user_input,
+                level=DEFAULT_LEVEL,
+                automatic_operation=DEFAULT_AUTOMATIC_OPERATION,
+            )
             if not errors:
                 if _find_entry_conflicts(self.hass, self._stable_data):
                     return self.async_abort(reason="devices_already_configured")
@@ -346,7 +401,8 @@ class NurserySootherConfigFlow(ConfigFlow, domain=DOMAIN):
         return self.async_show_form(
             step_id="reconfigure",
             data_schema=self.add_suggested_values_to_schema(
-                _stable_data_schema(self.hass), user_input or entry.data
+                _stable_data_schema(self.hass),
+                user_input or _stable_suggested_values(dict(entry.data)),
             ),
             errors=errors,
         )
@@ -358,15 +414,18 @@ class NurserySootherOptionsFlow(OptionsFlowWithReload):
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
-        """Update behavior settings while preserving the enabled state."""
+        """Update behavior while preserving the level and operating mode."""
         errors: dict[str, str] = {}
+        current_options = DEFAULT_OPTIONS | self.config_entry.options
         if user_input is not None:
-            enabled = bool(self.config_entry.options.get(CONF_ENABLED, DEFAULT_ENABLED))
-            options, errors = _normalize_behavior(user_input, enabled=enabled)
+            options, errors = _normalize_behavior(
+                user_input,
+                level=str(current_options[CONF_LEVEL]),
+                automatic_operation=bool(current_options[CONF_AUTOMATIC_OPERATION]),
+            )
             if not errors:
                 return self.async_create_entry(title="", data=options)
 
-        current_options = DEFAULT_OPTIONS | self.config_entry.options
         return self.async_show_form(
             step_id="init",
             data_schema=self.add_suggested_values_to_schema(
