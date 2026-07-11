@@ -1,0 +1,14 @@
+{
+  "title": "Nursery Soother",
+  "config": {
+    "step": {
+      "user": {
+        "title": "Set up Nursery Soother",
+        "description": "This foundation release only verifies that the integration can be installed and loaded. It will not monitor or control anything."
+      }
+    },
+    "abort": {
+      "single_instance_allowed": "Nursery Soother is already configured."
+    }
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "domain": "nursery_soother",
+  "name": "Nursery Soother",
+  "codeowners": ["@ppiekars"],
+  "config_flow": true,
+  "documentation": "https://github.com/ppiekars/nursery-soother#readme",
+  "integration_type": "helper",
+  "iot_class": "calculated",
+  "issue_tracker": "https://github.com/ppiekars/nursery-soother/issues",
+  "requirements": [],
+  "single_config_entry": true,
+  "version": "0.1.0"
+}
