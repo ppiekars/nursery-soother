@@ -1,0 +1,94 @@
+# Example manual Lovelace view for Nursery Soother.
+#
+# Entity IDs are assigned by Home Assistant and can be renamed. Before pasting
+# this view into a dashboard, replace every sample `nursery_soother_*` ID with
+# the entity shown on the Nursery Soother device page. Also replace
+# `camera.nursery` with the camera selected during setup.
+
+title: Nursery
+path: nursery
+icon: mdi:baby-face-outline
+cards:
+  - type: picture-entity
+    entity: camera.nursery
+    name: Nursery camera
+    camera_view: live
+    show_name: true
+    show_state: false
+
+  - type: entities
+    title: Nursery Soother
+    show_header_toggle: false
+    state_color: true
+    entities:
+      - entity: switch.nursery_soother_enabled
+        name: Enabled
+      - entity: sensor.nursery_soother_state
+        name: State
+      - entity: sensor.nursery_soother_recommendation
+        name: Recommendation
+      - entity: binary_sensor.nursery_soother_attention_required
+        name: Attention required
+
+  - type: entities
+    title: Safe volume limits
+    show_header_toggle: false
+    entities:
+      - entity: number.nursery_soother_baseline_volume
+        name: Baseline
+      - entity: number.nursery_soother_boost_volume
+        name: Boost
+      - entity: number.nursery_soother_maximum_volume
+        name: Maximum
+
+  - type: grid
+    title: Parent controls
+    columns: 2
+    square: false
+    cards:
+      - type: button
+        entity: button.nursery_soother_boost
+        name: Boost
+        icon: mdi:volume-plus
+        show_state: false
+        tap_action:
+          action: perform-action
+          perform_action: button.press
+          target:
+            entity_id: button.nursery_soother_boost
+
+      - type: button
+        entity: button.nursery_soother_return_to_baseline
+        name: Baseline
+        icon: mdi:volume-medium
+        show_state: false
+        tap_action:
+          action: perform-action
+          perform_action: button.press
+          target:
+            entity_id: button.nursery_soother_return_to_baseline
+
+      - type: button
+        entity: button.nursery_soother_acknowledge
+        name: Acknowledge
+        icon: mdi:check-circle-outline
+        show_state: false
+        tap_action:
+          action: perform-action
+          perform_action: button.press
+          target:
+            entity_id: button.nursery_soother_acknowledge
+
+      - type: button
+        entity: button.nursery_soother_stop
+        name: Stop
+        icon: mdi:stop-circle-outline
+        color: red
+        show_state: false
+        tap_action:
+          action: perform-action
+          confirmation:
+            text: Stop white noise and disable Nursery Soother?
+          perform_action: button.press
+          target:
+            entity_id: button.nursery_soother_stop
