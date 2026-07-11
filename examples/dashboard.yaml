@@ -23,12 +23,15 @@ cards:
     entities:
       - entity: switch.nursery_soother_enabled
         name: Enabled
-      - entity: switch.nursery_soother_simulated_cry
-        name: Simulated cry
+      - entity: button.nursery_soother_simulate_cry_event
+        name: Simulate cry event
         tap_action:
-          action: toggle
+          action: perform-action
+          perform_action: button.press
+          target:
+            entity_id: button.nursery_soother_simulate_cry_event
           confirmation:
-            text: Simulate a nursery cry and allow test notifications?
+            text: Inject a test cry event and notify both parents?
       - entity: sensor.nursery_soother_state
         name: State
       - entity: sensor.nursery_soother_recommendation

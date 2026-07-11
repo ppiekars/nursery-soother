@@ -123,9 +123,6 @@
     "switch": {
       "enabled": {
         "name": "Enabled"
-      },
-      "simulated_cry": {
-        "name": "Simulated cry"
       }
     },
     "number": {
@@ -151,6 +148,9 @@
       },
       "stop": {
         "name": "Stop"
+      },
+      "simulate_cry_event": {
+        "name": "Simulate cry event"
       }
     }
   },
@@ -190,6 +190,9 @@
     },
     "playback_settling": {
       "message": "Home Assistant is still waiting for a previous speaker command to settle. Try enabling Nursery Soother again in a few seconds."
+    },
+    "cry_already_active": {
+      "message": "The real cry sensor is already active, so a simulated event cannot be started."
     }
   }
 }

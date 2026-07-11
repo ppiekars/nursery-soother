@@ -106,6 +106,47 @@ async def test_setup_reload_and_unload(hass: HomeAssistant) -> None:
     )
 
 
+async def test_v2_migration_replaces_renamed_simulator_switch_with_button(
+    hass: HomeAssistant,
+) -> None:
+    """The 0.2.2 stateful simulator is removed even after a user rename."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        title=NAME,
+        data=CONFIG_DATA,
+        options=DEFAULT_OPTIONS,
+        version=2,
+    )
+    entry.add_to_hass(hass)
+    registry = er.async_get(hass)
+    legacy_unique_id = f"{entry.entry_id}_simulated_cry"
+    legacy = registry.async_get_or_create(
+        "switch",
+        DOMAIN,
+        legacy_unique_id,
+        config_entry=entry,
+    )
+    registry.async_update_entity(
+        legacy.entity_id,
+        new_entity_id="switch.renamed_legacy_cry_test",
+    )
+
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+
+    assert entry.version == ENTRY_VERSION
+    assert registry.async_get_entity_id("switch", DOMAIN, legacy_unique_id) is None
+    registry_entries = er.async_entries_for_config_entry(registry, entry.entry_id)
+    assert len(registry_entries) == ENTITY_COUNT
+    assert any(
+        item.domain == "button"
+        and item.unique_id == f"{entry.entry_id}_simulate_cry_event"
+        for item in registry_entries
+    )
+
+    assert await hass.config_entries.async_unload(entry.entry_id)
+
+
 async def test_functional_enabled_entry_setup_reload_and_unload(
     hass: HomeAssistant,
 ) -> None:

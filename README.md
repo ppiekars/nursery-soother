@@ -150,7 +150,7 @@ copy an assumed ID.
 | Entity type | Purpose | Standard Home Assistant action |
 | --- | --- | --- |
 | `switch` | Enable or disable the response loop | `switch.turn_on`, `switch.turn_off` |
-| `switch` | Simulate a sustained cry for diagnostics | `switch.turn_on`, `switch.turn_off` |
+| `button` | Inject one finite cry event for testing | `button.press` |
 | `sensor` | Current policy state | Read-only |
 | `sensor` | Current recommendation | Read-only |
 | `binary_sensor` | Whether parent attention is required | Read-only |
@@ -167,12 +167,13 @@ The state sensor uses the values `disabled`, `baseline`, `cry_pending`,
 responses all call the same controller, so the volume cap and state checks are
 enforced consistently.
 
-Turn on **Simulated cry** to exercise the same debounce, notification,
-escalation, and response path without changing the real cry sensor. Turn it off
-to simulate quiet and settling. Stop always clears the simulated input. A
-successful explicit Baseline or a fresh enabled session also clears any prior
-Boost cooldown, so a parent control is never rejected because of an older
-session.
+Press **Simulate cry event** to inject one finite test detection without
+changing the real cry sensor. It passes through the configured debounce, sends
+the normal actionable notification clearly marked as a test, and then releases
+automatically into settling. Repeated presses while that event is active are
+coalesced, and Stop always cancels it. A successful explicit Baseline or a
+fresh enabled session also clears any prior Boost cooldown, so a parent control
+is never rejected because of an older session.
 
 ## Parent notifications
 

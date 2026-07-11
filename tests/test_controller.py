@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 from dataclasses import dataclass, field
 from datetime import timedelta
 from typing import TYPE_CHECKING
@@ -283,68 +282,192 @@ async def test_suggestions_debounce_never_increases_automatically(
     assert len(_media_calls(calls, SERVICE_VOLUME_SET)) == initial_volume_calls
 
 
-async def test_simulated_cry_uses_real_debounce_and_quiet_paths(
+async def test_simulated_cry_event_debounces_notifies_and_auto_releases(
     hass: HomeAssistant,
     started_controller: tuple[NurserySootherController, RecordedCalls],
 ) -> None:
-    """The diagnostic input exercises policy without changing the real sensor."""
+    """One event uses real debounce, sends one test alert, and infers quiet."""
     controller, calls = started_controller
     initial_volume_calls = len(_media_calls(calls, SERVICE_VOLUME_SET))
 
-    await controller.async_set_simulated_cry(enabled=True)
-    assert controller.simulated_cry is True
+    await controller.async_simulate_cry_event()
+
     assert controller.state is SootherState.CRY_PENDING
     assert controller.recommendation is Recommendation.WAIT
+    assert controller.diagnostics["timers"]["debounce"] is True
+    assert controller.diagnostics["timers"]["simulated_cry_event"] is True
+    assert not _incident_notifications(calls)
 
     await _advance(hass, 11)
 
+    assert controller.state is SootherState.CRY_PENDING
     assert controller.recommendation is Recommendation.BOOST
-    assert len(_incident_notifications(calls)) == PARENT_COUNT
+    notifications = _incident_notifications(calls)
+    assert len(notifications) == PARENT_COUNT
+    assert all(
+        call.data["message"].startswith("[Test] Simulated cry event")
+        for call in notifications
+    )
+    assert controller.diagnostics["timers"]["escalation"] is False
     assert len(_media_calls(calls, SERVICE_VOLUME_SET)) == initial_volume_calls
 
-    await controller.async_set_simulated_cry(enabled=False)
+    await _advance(hass, 13)
 
-    assert controller.simulated_cry is False
     assert controller.state is SootherState.SETTLING
     assert controller.recommendation is Recommendation.SETTLING
+    assert controller.diagnostics["timers"]["simulated_cry_event"] is False
+    assert controller.diagnostics["timers"]["escalation"] is False
+    assert controller.diagnostics["timers"]["settling"] is True
+
+    await _advance(hass, 34)
+
+    assert controller.state is SootherState.BASELINE
+    assert controller.recommendation is Recommendation.NONE
+    assert not controller.attention_required
+    assert len(_incident_notifications(calls)) == PARENT_COUNT
 
 
-async def test_stop_clears_simulated_cry_and_disabled_simulation_is_rejected(
-    started_controller: tuple[NurserySootherController, RecordedCalls],
-) -> None:
-    """A diagnostic cry cannot leak into a disabled or later session."""
-    controller, _ = started_controller
-    await controller.async_set_simulated_cry(enabled=True)
-
-    await controller.async_stop()
-
-    assert controller.simulated_cry is False
-    assert controller.state is SootherState.DISABLED
-    with pytest.raises(ServiceValidationError):
-        await controller.async_set_simulated_cry(enabled=True)
-
-
-async def test_simulated_cry_off_cannot_hide_dependency_outage(
+async def test_repeated_simulated_cry_events_are_coalesced(
     hass: HomeAssistant,
     started_controller: tuple[NurserySootherController, RecordedCalls],
 ) -> None:
-    """Changing the simulated input cannot replace a fail-safe recommendation."""
+    """Repeated presses during one synthetic pulse cannot duplicate an alert."""
+    controller, calls = started_controller
+    await controller.async_simulate_cry_event()
+    episode = controller._episode  # noqa: SLF001
+
+    await controller.async_simulate_cry_event()
+    await _advance(hass, 11)
+
+    assert controller._episode == episode  # noqa: SLF001
+    assert len(_incident_notifications(calls)) == PARENT_COUNT
+
+
+async def test_acknowledge_during_simulated_event_cannot_strand_virtual_input(
+    hass: HomeAssistant,
+    started_controller: tuple[NurserySootherController, RecordedCalls],
+) -> None:
+    """An acknowledgement generation change still allows the pulse to release."""
+    controller, calls = started_controller
+    await controller.async_simulate_cry_event()
+
+    await controller.async_acknowledge()
+    await _advance(hass, 13)
+
+    assert controller.state is SootherState.SETTLING
+    assert controller.recommendation is Recommendation.SETTLING
+    assert controller.diagnostics["timers"]["simulated_cry_event"] is False
+    assert controller.diagnostics["timers"]["settling"] is True
+    assert not _incident_notifications(calls)
+
+
+async def test_acknowledge_after_simulated_notification_still_releases_event(
+    hass: HomeAssistant,
+    started_controller: tuple[NurserySootherController, RecordedCalls],
+) -> None:
+    """A post-notification acknowledgement cannot invalidate pulse cleanup."""
+    controller, calls = started_controller
+    await controller.async_simulate_cry_event()
+    await _advance(hass, 11)
+
+    await controller.async_acknowledge()
+    await _advance(hass, 13)
+
+    assert controller.state is SootherState.SETTLING
+    assert controller.recommendation is Recommendation.SETTLING
+    assert controller.diagnostics["timers"]["simulated_cry_event"] is False
+    assert controller.diagnostics["timers"]["settling"] is True
+    assert len(_incident_notifications(calls)) == PARENT_COUNT
+
+
+async def test_simulated_event_cannot_escalate_with_one_second_deadline(
+    hass: HomeAssistant,
+    started_controller: tuple[NurserySootherController, RecordedCalls],
+) -> None:
+    """Synthetic-only input never creates persistent-cry attention."""
     controller, _ = started_controller
-    await controller.async_set_simulated_cry(enabled=True)
+    controller.settings.escalation_seconds = 1
+
+    await controller.async_simulate_cry_event()
+    await _advance(hass, 11)
+
+    assert controller.recommendation is Recommendation.BOOST
+    assert controller.diagnostics["timers"]["escalation"] is False
+
+    await _advance(hass, 13)
+
+    assert controller.state is SootherState.SETTLING
+    assert controller.recommendation is Recommendation.SETTLING
+    assert not controller.attention_required
+
+
+async def test_simulated_release_cannot_hide_notification_failure(
+    hass: HomeAssistant,
+    started_controller: tuple[NurserySootherController, RecordedCalls],
+) -> None:
+    """A failed test alert remains fail-safe after the synthetic input releases."""
+    controller, _ = started_controller
+
+    @callback
+    def _fail_notification(call: ServiceCall) -> None:
+        del call
+        error_message = "test notification delivery failed"
+        raise HomeAssistantError(error_message)
+
+    hass.services.async_register("notify", "parent_one", _fail_notification)
+    hass.services.async_register("notify", "parent_two", _fail_notification)
+    await controller.async_simulate_cry_event()
+    await _advance(hass, 11)
+
+    assert controller.state is SootherState.ATTENTION_REQUIRED
+    assert controller.recommendation is Recommendation.CHECK_DEVICES
+
+    await _advance(hass, 13)
+
+    assert controller.state is SootherState.ATTENTION_REQUIRED
+    assert controller.recommendation is Recommendation.CHECK_DEVICES
+    assert controller.diagnostics["timers"]["simulated_cry_event"] is False
+    assert controller.diagnostics["timers"]["settling"] is False
+
+
+async def test_stop_cancels_simulated_event_and_disabled_simulation_is_rejected(
+    hass: HomeAssistant,
+    started_controller: tuple[NurserySootherController, RecordedCalls],
+) -> None:
+    """A synthetic event cannot leak into a disabled or later session."""
+    controller, calls = started_controller
+    await controller.async_simulate_cry_event()
+
+    await controller.async_stop()
+    await _advance(hass, 60)
+
+    assert controller.state is SootherState.DISABLED
+    assert not any(controller.diagnostics["timers"].values())
+    assert not _incident_notifications(calls)
+    with pytest.raises(ServiceValidationError):
+        await controller.async_simulate_cry_event()
+
+
+async def test_dependency_outage_cancels_simulated_event_without_hiding_failure(
+    hass: HomeAssistant,
+    started_controller: tuple[NurserySootherController, RecordedCalls],
+) -> None:
+    """An outage cancels the test pulse and keeps fail-safe state authoritative."""
+    controller, calls = started_controller
+    await controller.async_simulate_cry_event()
 
     hass.states.async_set(CAMERA, STATE_UNAVAILABLE)
     await hass.async_block_till_done()
+    await _advance(hass, 60)
 
     assert controller.state is SootherState.ATTENTION_REQUIRED
     assert controller.recommendation is Recommendation.CHECK_DEVICES
     assert not controller.dependencies_available
-
-    await controller.async_set_simulated_cry(enabled=False)
-
-    assert controller.simulated_cry is False
-    assert controller.state is SootherState.ATTENTION_REQUIRED
-    assert controller.recommendation is Recommendation.CHECK_DEVICES
-    assert controller.diagnostics["timers"]["settling"] is False
+    assert not any(controller.diagnostics["timers"].values())
+    assert not any(
+        call.data["message"].startswith("[Test]")
+        for call in _incident_notifications(calls)
+    )
 
     hass.states.async_set(CAMERA, "idle")
     await hass.async_block_till_done()
@@ -354,34 +477,93 @@ async def test_simulated_cry_off_cannot_hide_dependency_outage(
     assert controller.recommendation is Recommendation.NONE
 
 
-async def test_simulated_and_physical_cry_start_race_emits_one_edge(
+async def test_physical_cry_during_simulated_event_survives_auto_release(
     hass: HomeAssistant,
     started_controller: tuple[NurserySootherController, RecordedCalls],
 ) -> None:
-    """Concurrent aggregate inputs cannot lose or duplicate the cry edge."""
-    controller, _ = started_controller
-    episode = controller._episode  # noqa: SLF001
+    """A real cry keeps the episode active after the test pulse releases."""
+    controller, calls = started_controller
+    await controller.async_simulate_cry_event()
 
-    async with controller._lock:  # noqa: SLF001
-        simulated_task = asyncio.create_task(
-            controller.async_set_simulated_cry(enabled=True)
-        )
-        await asyncio.sleep(0)
-        hass.states.async_set(CRY_SENSOR, "on")
+    await _set_cry(hass, "on")
+    await _advance(hass, 11)
 
-    await simulated_task
-    await hass.async_block_till_done()
+    assert all(
+        not call.data["message"].startswith("[Test]")
+        for call in _incident_notifications(calls)
+    )
+    assert controller.diagnostics["timers"]["escalation"] is True
+
+    await _advance(hass, 13)
 
     assert controller.state is SootherState.CRY_PENDING
-    assert controller.recommendation is Recommendation.WAIT
-    assert controller.diagnostics["timers"]["debounce"] is True
-    assert controller._episode == episode + 1  # noqa: SLF001
-
-    await controller.async_set_simulated_cry(enabled=False)
-    assert controller.state is SootherState.CRY_PENDING
+    assert controller.recommendation is Recommendation.BOOST
+    assert controller.diagnostics["timers"]["simulated_cry_event"] is False
+    assert controller.diagnostics["timers"]["escalation"] is True
+    assert controller.diagnostics["timers"]["settling"] is False
 
     await _set_cry(hass, "off")
-    assert controller.state is SootherState.BASELINE
+
+    assert controller.state is SootherState.SETTLING
+    assert controller.recommendation is Recommendation.SETTLING
+
+
+async def test_physical_cry_after_test_notification_starts_escalation(
+    hass: HomeAssistant,
+    started_controller: tuple[NurserySootherController, RecordedCalls],
+) -> None:
+    """A real cry joining a confirmed test event upgrades attention timing."""
+    controller, _ = started_controller
+    await controller.async_simulate_cry_event()
+    await _advance(hass, 11)
+    assert controller.diagnostics["timers"]["escalation"] is False
+
+    await _set_cry(hass, "on")
+
+    assert controller.diagnostics["timers"]["escalation"] is True
+    await _advance(hass, 13)
+    assert controller.state is SootherState.CRY_PENDING
+    assert controller.recommendation is Recommendation.BOOST
+    assert controller.diagnostics["timers"]["escalation"] is True
+
+
+async def test_real_cry_ending_inside_test_pulse_cancels_escalation(
+    hass: HomeAssistant,
+    started_controller: tuple[NurserySootherController, RecordedCalls],
+) -> None:
+    """Synthetic overlap cannot keep real-source attention timing alive."""
+    controller, _ = started_controller
+    controller.settings.escalation_seconds = 1
+    await controller.async_simulate_cry_event()
+    await _advance(hass, 11)
+
+    await _set_cry(hass, "on")
+    assert controller.diagnostics["timers"]["escalation"] is True
+    await _set_cry(hass, "off")
+    assert controller.diagnostics["timers"]["escalation"] is False
+
+    await _advance(hass, 13)
+
+    assert controller.state is SootherState.SETTLING
+    assert controller.recommendation is Recommendation.SETTLING
+    assert not controller.attention_required
+
+
+async def test_simulated_event_is_rejected_while_real_cry_is_active(
+    hass: HomeAssistant,
+    started_controller: tuple[NurserySootherController, RecordedCalls],
+) -> None:
+    """A test press cannot replace an episode already driven by real input."""
+    controller, _ = started_controller
+    await _set_cry(hass, "on")
+    episode = controller._episode  # noqa: SLF001
+
+    with pytest.raises(ServiceValidationError) as error:
+        await controller.async_simulate_cry_event()
+
+    assert error.value.translation_key == "cry_already_active"
+    assert controller._episode == episode  # noqa: SLF001
+    assert controller.diagnostics["timers"]["simulated_cry_event"] is False
 
 
 async def test_false_alarm_cancels_debounce(
@@ -1036,12 +1218,13 @@ async def test_redundant_enable_is_idempotent_during_boost(
     assert len(_media_calls(calls, SERVICE_VOLUME_SET)) == volume_count
 
 
-async def test_sonos_late_signed_id_is_adopted_for_owned_playback(
+async def test_fresh_sonos_session_waits_for_id_then_accepts_boost(
     hass: HomeAssistant,
     started_controller: tuple[NurserySootherController, RecordedCalls],
 ) -> None:
-    """A late signed URL belongs to the same Sonos play that first had no ID."""
+    """A fresh session resets cooldown but still waits for verified Sonos media."""
     controller, calls = started_controller
+    assert await controller.async_boost()
     play_context = await _restart_with_sonos_play_state(
         hass,
         controller,

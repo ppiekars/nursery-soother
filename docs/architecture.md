@@ -219,10 +219,14 @@ recommendation clears when the interval expires. A successful parent-selected
 Baseline, Stop, or fresh Enable resets cooldown because those actions establish
 a new explicit control boundary.
 
-The diagnostic Simulated cry switch contributes a virtual cry input alongside
-the configured sensor. Turning it on and off uses the same debounce, settling,
-notification, and escalation state machine as physical sensor edges. It cannot
-be enabled while the controller is disabled or unsafe, and Stop clears it.
+The configuration-category Simulate cry event button contributes one finite
+virtual detection pulse alongside the configured sensor. A press uses the real
+debounce and notification path, then automatically releases into settling. It
+does not expose an on/off state, cannot create a persistent-cry escalation by
+itself, and is canceled by Stop, unload, dependency loss, or another explicit
+episode boundary. Repeated presses during the same pulse are coalesced. If the
+physical cry sensor turns on before release, that real input keeps the episode
+active normally.
 
 ## Timer and concurrency rules
 
@@ -308,11 +312,11 @@ than polling.
 
 | Platform | Entities | Behavior |
 | --- | --- | --- |
-| `switch` | Enabled, Simulated cry | Start/stop the policy or inject a diagnostic cry input |
+| `switch` | Enabled | Start or stop the response policy |
 | `sensor` | State, Recommendation | Read-only enum state from controller memory |
 | `binary_sensor` | Attention required | True only when parent attention is currently requested |
 | `number` | Baseline, Boost, Maximum volume | Persist validated percentage options |
-| `button` | Boost, Baseline, Acknowledge, Stop | Stateless commands routed to controller |
+| `button` | Boost, Baseline, Acknowledge, Stop, Simulate cry event | Stateless commands routed to controller |
 
 Entity IDs are user-editable registry data and must never be used as internal
 identity. Automations, dashboards, HomeKit Bridge, and Shortcuts use standard

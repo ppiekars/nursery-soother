@@ -5,11 +5,13 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from homeassistant.components.button import ButtonEntity, ButtonEntityDescription
+from homeassistant.const import EntityCategory
 
 from .const import (
     SERVICE_ACKNOWLEDGE,
     SERVICE_BASELINE,
     SERVICE_BOOST,
+    SERVICE_SIMULATE_CRY_EVENT,
     SERVICE_STOP,
 )
 from .entity import NurserySootherEntity
@@ -32,6 +34,11 @@ BUTTONS = (
         translation_key="acknowledge",
     ),
     ButtonEntityDescription(key=SERVICE_STOP, translation_key="stop"),
+    ButtonEntityDescription(
+        key=SERVICE_SIMULATE_CRY_EVENT,
+        translation_key="simulate_cry_event",
+        entity_category=EntityCategory.CONFIG,
+    ),
 )
 
 
@@ -67,5 +74,6 @@ class NurserySootherActionButton(NurserySootherEntity, ButtonEntity):
             SERVICE_BASELINE: self._controller.async_baseline,
             SERVICE_ACKNOWLEDGE: self._controller.async_acknowledge,
             SERVICE_STOP: self._controller.async_stop,
+            SERVICE_SIMULATE_CRY_EVENT: (self._controller.async_simulate_cry_event),
         }
         await actions[self.entity_description.key]()

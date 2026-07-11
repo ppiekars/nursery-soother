@@ -6,7 +6,9 @@ import logging
 from typing import TYPE_CHECKING, Any
 
 from homeassistant.config_entries import ConfigEntry, ConfigEntryError
+from homeassistant.const import Platform
 from homeassistant.core import valid_entity_id
+from homeassistant.helpers import entity_registry as er
 
 from .const import (
     CONF_BASELINE_VOLUME,
@@ -149,13 +151,25 @@ async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry[Any]) -> b
         return False
     if entry.version == ENTRY_VERSION:
         return True
-    if entry.version != 1:
+    if entry.version not in {1, 2}:
         return False
 
-    options = DEFAULT_OPTIONS | dict(entry.options)
-    # The foundation did not collect media or notification configuration. Keep
-    # it safely disabled until the user completes Reconfigure in the UI.
-    options[CONF_ENABLED] = False
+    options = dict(entry.options)
+    if entry.version == 1:
+        options = DEFAULT_OPTIONS | options
+        # The foundation did not collect media or notification configuration.
+        # Keep it safely disabled until Reconfigure is completed in the UI.
+        options[CONF_ENABLED] = False
+
+    registry = er.async_get(hass)
+    legacy_simulator = registry.async_get_entity_id(
+        Platform.SWITCH,
+        DOMAIN,
+        f"{entry.entry_id}_simulated_cry",
+    )
+    if legacy_simulator is not None:
+        registry.async_remove(legacy_simulator)
+
     hass.config_entries.async_update_entry(
         entry,
         options=options,
