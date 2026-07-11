@@ -5,9 +5,9 @@ from __future__ import annotations
 import asyncio
 import logging
 import secrets
-from collections import deque
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, TypeGuard
+from urllib.parse import parse_qsl, unquote, urlsplit
 
 from homeassistant.components.media_player.const import (
     ATTR_MEDIA_CONTENT_ID,
@@ -43,6 +43,7 @@ from homeassistant.core import (
 )
 from homeassistant.exceptions import ServiceValidationError
 from homeassistant.helpers.event import async_call_later, async_track_state_change_event
+from homeassistant.helpers.network import is_hass_url
 from homeassistant.util import dt as dt_util
 
 from .const import (
@@ -75,6 +76,8 @@ if TYPE_CHECKING:
 _LOGGER = logging.getLogger(__name__)
 SERVICE_CALL_TIMEOUT = 10
 FAILED_PLAY_COMPENSATION_SECONDS = 15
+AUTH_SIGNATURE_QUERY_PARAMETER = "authSig"
+LOCAL_MEDIA_URL_PREFIX = "/media/"
 
 type ControllerListener = Callable[[], None]
 
@@ -134,7 +137,6 @@ class NurserySootherController:
         self._pending_play_context_id: str | None = None
         self._failed_play_context_ids: set[str] = set()
         self._failed_play_expiries: dict[str, CALLBACK_TYPE] = {}
-        self._media_context_ids: deque[str] = deque(maxlen=16)
         self._started = False
         self._lock = asyncio.Lock()
 
@@ -1015,18 +1017,22 @@ class NurserySootherController:
             self._awaiting_playback_confirmation = False
             self._pending_play_context_id = None
             media_state = self.hass.states.get(media_player)
+            current_content_id = (
+                media_state.attributes.get(ATTR_MEDIA_CONTENT_ID)
+                if media_state is not None
+                else None
+            )
             if (
                 media_state is not None
-                and media_state.context.id == play_context.id
+                and self._state_has_play_context(media_state, play_context.id)
                 and media_state.state
                 in {MediaPlayerState.PLAYING, MediaPlayerState.BUFFERING}
+                and self._media_content_id_matches_configured(current_content_id)
             ):
                 self._clear_failed_play_context(play_context.id)
                 self._owns_playback = True
                 self._owned_play_context_id = play_context.id
-                current_content_id = media_state.attributes.get(ATTR_MEDIA_CONTENT_ID)
-                if isinstance(current_content_id, str):
-                    self._owned_media_content_id = current_content_id
+                self._owned_media_content_id = current_content_id
                 await self._async_stop_playback()
             self._playback_interrupted = True
             return False
@@ -1039,16 +1045,13 @@ class NurserySootherController:
             else None
         )
         if (
-            isinstance(current_content_id, str)
-            and media_state is not None
-            and (
-                media_state.context.id == play_context.id
-                or current_content_id == media[ATTR_MEDIA_CONTENT_ID]
-            )
+            media_state is not None
+            and media_state.state
+            in {MediaPlayerState.PLAYING, MediaPlayerState.BUFFERING}
+            and self._state_has_play_context(media_state, play_context.id)
+            and self._media_content_id_matches_configured(current_content_id)
         ):
-            self._owned_media_content_id = current_content_id
-            self._awaiting_playback_confirmation = False
-            self._pending_play_context_id = None
+            self._adopt_owned_media_content_id(current_content_id)
         return True
 
     async def _async_set_speaker_volume(
@@ -1085,20 +1088,20 @@ class NurserySootherController:
             return False
         current_content_id = media_state.attributes.get(ATTR_MEDIA_CONTENT_ID)
         if self._awaiting_playback_confirmation:
-            if media_state.context.id != self._pending_play_context_id:
+            if current_content_id is None:
                 return False
-            if isinstance(current_content_id, str):
+            still_owned = self._pending_playback_is_owned(
+                media_state, current_content_id
+            )
+        elif self._owned_media_content_id is not None:
+            still_owned = self._identified_media_state_is_owned(
+                media_state, current_content_id
+            )
+            if still_owned and isinstance(current_content_id, str):
                 self._owned_media_content_id = current_content_id
-            self._awaiting_playback_confirmation = False
-            self._pending_play_context_id = None
-            return True
-
-        if self._owned_media_content_id is not None:
-            still_owned = current_content_id == self._owned_media_content_id
         else:
             still_owned = current_content_id is None and (
-                media_state.context.id == self._owned_play_context_id
-                or media_state.context.id in self._media_context_ids
+                self._state_has_play_context(media_state, self._owned_play_context_id)
             )
         if still_owned:
             return True
@@ -1114,37 +1117,39 @@ class NurserySootherController:
         new_state = event.data.get("new_state")
         if new_state is None:
             return False
-        context_matches = new_state.context.id in self._failed_play_context_ids
-        if not context_matches:
+        failed_context_id = next(
+            (
+                context_id
+                for context_id in self._failed_play_context_ids
+                if self._state_has_play_context(new_state, context_id)
+            ),
+            None,
+        )
+        if failed_context_id is None:
             return False
         live_state = (
             self.hass.states.get(self.media_player)
             if self.media_player is not None
             else None
         )
-        if new_state is not live_state:
-            return True
-        if new_state.state not in {
-            MediaPlayerState.PLAYING,
-            MediaPlayerState.BUFFERING,
-        }:
-            return True
-
-        self._clear_failed_play_context(new_state.context.id)
-        self._owns_playback = True
-        self._owned_play_context_id = new_state.context.id
         current_content_id = new_state.attributes.get(ATTR_MEDIA_CONTENT_ID)
-        self._owned_media_content_id = (
-            current_content_id if isinstance(current_content_id, str) else None
-        )
-        if await self._async_stop_playback():
-            return True
-        self._transition(
-            SootherState.ATTENTION_REQUIRED,
-            Recommendation.CHECK_DEVICES,
-            "late failed playback could not be stopped",
-        )
-        await self._async_notify_dependency_problem()
+        if (
+            new_state is live_state
+            and new_state.state
+            in {MediaPlayerState.PLAYING, MediaPlayerState.BUFFERING}
+            and self._media_content_id_matches_configured(current_content_id)
+        ):
+            self._clear_failed_play_context(failed_context_id)
+            self._owns_playback = True
+            self._owned_play_context_id = failed_context_id
+            self._owned_media_content_id = current_content_id
+            if not await self._async_stop_playback():
+                self._transition(
+                    SootherState.ATTENTION_REQUIRED,
+                    Recommendation.CHECK_DEVICES,
+                    "late failed playback could not be stopped",
+                )
+                await self._async_notify_dependency_problem()
         return True
 
     def _track_failed_play_context(self, context_id: str) -> None:
@@ -1225,23 +1230,25 @@ class NurserySootherController:
             return False
         current_content_id = media_state.attributes.get(ATTR_MEDIA_CONTENT_ID)
         if self._owned_media_content_id is not None:
-            should_stop = current_content_id == self._owned_media_content_id
+            should_stop = self._identified_media_state_is_owned(
+                media_state, current_content_id
+            )
+            if should_stop and isinstance(current_content_id, str):
+                self._owned_media_content_id = current_content_id
             if not should_stop:
                 self._relinquish_playback()
             return should_stop
         if self._awaiting_playback_confirmation:
-            should_stop = media_state.context.id == self._pending_play_context_id
-            if should_stop:
-                self._awaiting_playback_confirmation = False
-                self._pending_play_context_id = None
-            else:
+            should_stop = self._pending_playback_is_owned(
+                media_state, current_content_id
+            )
+            if not should_stop:
                 if self._pending_play_context_id is not None:
                     self._track_failed_play_context(self._pending_play_context_id)
                 self._clear_playback_ownership()
             return should_stop
-        should_stop = (
-            media_state.context.id == self._owned_play_context_id
-            or media_state.context.id in self._media_context_ids
+        should_stop = current_content_id is None and self._state_has_play_context(
+            media_state, self._owned_play_context_id
         )
         if not should_stop:
             self._relinquish_playback()
@@ -1270,13 +1277,24 @@ class NurserySootherController:
         if self._owned_media_content_id is None:
             return self._unidentified_media_was_replaced(event)
         new_content_id = new_state.attributes.get(ATTR_MEDIA_CONTENT_ID)
-        replaced = (
-            new_content_id != self._owned_media_content_id
-            and new_state.state
-            in {MediaPlayerState.PLAYING, MediaPlayerState.BUFFERING}
-            and new_state.context.id != self._owned_play_context_id
-            and new_state.context.id not in self._media_context_ids
+        ownership_changed = not self._identified_media_state_is_owned(
+            new_state, new_content_id
         )
+        replacement_state = new_state.state in {
+            MediaPlayerState.PLAYING,
+            MediaPlayerState.BUFFERING,
+        } or (
+            isinstance(new_content_id, str)
+            and new_state.state
+            in {
+                MediaPlayerState.IDLE,
+                MediaPlayerState.OFF,
+                MediaPlayerState.PAUSED,
+            }
+        )
+        replaced = ownership_changed and replacement_state
+        if not replaced and isinstance(new_content_id, str):
+            self._owned_media_content_id = new_content_id
         if replaced:
             self._relinquish_playback()
         return replaced
@@ -1288,12 +1306,16 @@ class NurserySootherController:
         if self._awaiting_playback_confirmation:
             return self._handle_pending_playback_confirmation(event)
         new_state = event.data.get("new_state")
+        if new_state is not None:
+            new_content_id = new_state.attributes.get(ATTR_MEDIA_CONTENT_ID)
+            if self._media_content_id_matches_configured(new_content_id):
+                self._adopt_owned_media_content_id(new_content_id)
+                return False
         replaced = (
             new_state is not None
             and new_state.state
             in {MediaPlayerState.PLAYING, MediaPlayerState.BUFFERING}
-            and new_state.context.id != self._owned_play_context_id
-            and new_state.context.id not in self._media_context_ids
+            and not self._state_has_play_context(new_state, self._owned_play_context_id)
         )
         if replaced:
             self._relinquish_playback()
@@ -1311,25 +1333,123 @@ class NurserySootherController:
             MediaPlayerState.BUFFERING,
         }:
             return False
-        old_state = event.data.get("old_state")
-        old_content_id = (
-            old_state.attributes.get(ATTR_MEDIA_CONTENT_ID)
-            if old_state is not None
-            else None
-        )
         new_content_id = new_state.attributes.get(ATTR_MEDIA_CONTENT_ID)
-        if new_state.context.id == self._pending_play_context_id:
-            if isinstance(new_content_id, str):
-                self._owned_media_content_id = new_content_id
-            self._awaiting_playback_confirmation = False
-            self._pending_play_context_id = None
-            return False
-        if new_state.context.id in self._media_context_ids:
-            return False
-        if new_content_id != old_content_id or new_content_id is None:
+        if isinstance(new_content_id, str):
+            if self._pending_playback_is_owned(new_state, new_content_id):
+                return False
             self._relinquish_playback()
             return True
+        # Players can publish several no-ID states before exposing the resolved
+        # local-media URL. They remain unverified and cannot authorize effects.
         return False
+
+    def _pending_playback_is_owned(
+        self, media_state: State, media_content_id: object
+    ) -> bool:
+        """Verify pending playback and adopt its late-arriving usable ID."""
+        if not self._media_content_id_matches_configured(media_content_id):
+            return False
+        if media_state.context.user_id is not None and not self._state_has_play_context(
+            media_state, self._pending_play_context_id
+        ):
+            return False
+        self._adopt_owned_media_content_id(media_content_id)
+        return True
+
+    @staticmethod
+    def _state_has_play_context(media_state: State, context_id: str | None) -> bool:
+        """Return whether state context is the play call or its direct child."""
+        return context_id is not None and context_id in (
+            media_state.context.id,
+            media_state.context.parent_id,
+        )
+
+    def _configured_media_content_id(self) -> str | None:
+        """Return the configured source identifier when available."""
+        if self.white_noise is None:
+            return None
+        content_id = self.white_noise.get(ATTR_MEDIA_CONTENT_ID)
+        return content_id if isinstance(content_id, str) else None
+
+    def _media_content_id_matches_configured(
+        self, media_content_id: object
+    ) -> TypeGuard[str]:
+        """Return whether an observed ID is the configured local media."""
+        return self._media_content_ids_match(
+            media_content_id, self._configured_media_content_id()
+        )
+
+    def _identified_media_state_is_owned(
+        self, media_state: State, media_content_id: object
+    ) -> bool:
+        """Match owned media unless a user explicitly supplied a fresh raw ID."""
+        owned_content_id = self._owned_media_content_id
+        if not self._media_content_ids_match(media_content_id, owned_content_id):
+            return False
+        return not (
+            isinstance(media_content_id, str)
+            and media_content_id != owned_content_id
+            and media_state.context.user_id is not None
+        )
+
+    def _media_content_ids_match(self, first: object, second: object) -> bool:
+        """Compare raw IDs or stable identities for HA-hosted local media."""
+        if not isinstance(first, str) or not isinstance(second, str):
+            return False
+        if first == second:
+            return True
+        first_identity = self._local_media_identity(first)
+        second_identity = self._local_media_identity(second)
+        return first_identity is not None and first_identity == second_identity
+
+    def _local_media_identity(
+        self, content_id: str
+    ) -> tuple[str, tuple[tuple[str, str], ...], str] | None:
+        """Return path identity while excluding only HA's volatile authSig."""
+        try:
+            parsed = urlsplit(content_id)
+        except ValueError:
+            return None
+
+        path = unquote(parsed.path)
+        if parsed.scheme == "media-source":
+            if parsed.netloc != "media_source" or not path.startswith("/"):
+                return None
+            relative_path = path.removeprefix("/")
+            query = tuple(sorted(parse_qsl(parsed.query, keep_blank_values=True)))
+        elif parsed.scheme in {"", "http", "https"}:
+            if (
+                not path.startswith(LOCAL_MEDIA_URL_PREFIX)
+                or (not parsed.scheme and parsed.netloc)
+                or (parsed.scheme and not self._is_home_assistant_url(content_id))
+            ):
+                return None
+            relative_path = path.removeprefix(LOCAL_MEDIA_URL_PREFIX)
+            query = tuple(
+                sorted(
+                    (key, value)
+                    for key, value in parse_qsl(parsed.query, keep_blank_values=True)
+                    if key != AUTH_SIGNATURE_QUERY_PARAMETER
+                )
+            )
+        else:
+            return None
+        if not relative_path:
+            return None
+        return relative_path, query, unquote(parsed.fragment)
+
+    def _is_home_assistant_url(self, content_id: str) -> bool:
+        """Safely identify absolute URLs served by this Home Assistant."""
+        try:
+            return is_hass_url(self.hass, content_id)
+        except TypeError, ValueError:
+            return False
+
+    def _adopt_owned_media_content_id(self, media_content_id: str) -> None:
+        """Finish pending confirmation with a usable stable media identity."""
+        self._owned_media_content_id = media_content_id
+        self._awaiting_playback_confirmation = False
+        self._pending_play_context_id = None
 
     def _relinquish_playback(self) -> None:
         """Forget playback once another source has definitely taken over."""
@@ -1348,7 +1468,6 @@ class NurserySootherController:
         if self.media_player is None:
             return False
         call_context = context or Context()
-        self._media_context_ids.append(call_context.id)
         try:
             async with asyncio.timeout(SERVICE_CALL_TIMEOUT):
                 await self.hass.services.async_call(

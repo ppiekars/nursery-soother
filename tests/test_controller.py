@@ -21,7 +21,7 @@ from homeassistant.const import (
     SERVICE_VOLUME_SET,
     STATE_UNAVAILABLE,
 )
-from homeassistant.core import ServiceCall, callback
+from homeassistant.core import Context, ServiceCall, callback
 from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 from homeassistant.util import dt as dt_util
 from pytest_homeassistant_custom_component.common import (
@@ -90,6 +90,11 @@ SPEAKER_FEATURES = (
     | MediaPlayerEntityFeature.VOLUME_SET
     | MediaPlayerEntityFeature.STOP
 )
+SONOS_NURSERY_URL = "http://192.0.2.1:8123/media/local/white-noise.mp3?authSig=first"
+SONOS_REFRESHED_NURSERY_URL = (
+    "http://192.0.2.1:8123/media/local/white-noise.mp3?authSig=refreshed"
+)
+SONOS_BASE_URL = "http://192.0.2.1:8123"
 
 
 @dataclass
@@ -175,6 +180,36 @@ def _incident_notifications(calls: RecordedCalls) -> list[ServiceCall]:
         for call in calls.notifications
         if call.data.get("message") != "clear_notification"
     ]
+
+
+async def _restart_with_sonos_play_state(
+    hass: HomeAssistant,
+    controller: NurserySootherController,
+    calls: RecordedCalls,
+    *,
+    media_content_id: str | None,
+) -> Context:
+    """Restart with Sonos reporting one play state before its service returns."""
+    await controller.async_stop()
+    hass.config.internal_url = SONOS_BASE_URL
+
+    @callback
+    def _record_sonos_play(call: ServiceCall) -> None:
+        calls.media.append(call)
+        attributes = {ATTR_SUPPORTED_FEATURES: int(SPEAKER_FEATURES)}
+        if media_content_id is not None:
+            attributes[ATTR_MEDIA_CONTENT_ID] = media_content_id
+        hass.states.async_set(
+            MEDIA_PLAYER,
+            "playing",
+            attributes,
+            context=call.context,
+        )
+
+    hass.services.async_register("media_player", SERVICE_PLAY_MEDIA, _record_sonos_play)
+    await controller.async_set_enabled(enabled=True)
+    await hass.async_block_till_done()
+    return _media_calls(calls, SERVICE_PLAY_MEDIA)[-1].context
 
 
 async def _advance(hass: HomeAssistant, seconds: int) -> None:
@@ -838,6 +873,295 @@ async def test_redundant_enable_is_idempotent_during_boost(
     assert len(_media_calls(calls, SERVICE_VOLUME_SET)) == volume_count
 
 
+async def test_sonos_late_signed_id_is_adopted_for_owned_playback(
+    hass: HomeAssistant,
+    started_controller: tuple[NurserySootherController, RecordedCalls],
+) -> None:
+    """A late signed URL belongs to the same Sonos play that first had no ID."""
+    controller, calls = started_controller
+    play_context = await _restart_with_sonos_play_state(
+        hass,
+        controller,
+        calls,
+        media_content_id=None,
+    )
+    assert controller.diagnostics["playback_owned"] is True
+    volume_count = len(_media_calls(calls, SERVICE_VOLUME_SET))
+    assert not await controller.async_boost()
+    assert len(_media_calls(calls, SERVICE_VOLUME_SET)) == volume_count
+
+    hass.states.async_set(
+        MEDIA_PLAYER,
+        "playing",
+        {
+            ATTR_SUPPORTED_FEATURES: int(SPEAKER_FEATURES),
+            ATTR_MEDIA_CONTENT_ID: SONOS_NURSERY_URL,
+        },
+        context=Context(parent_id=play_context.id),
+    )
+    await hass.async_block_till_done()
+
+    assert controller.state is SootherState.BASELINE
+    assert controller.diagnostics["playback_owned"] is True
+    assert controller.diagnostics["playback_interrupted"] is False
+    assert await controller.async_boost()
+
+
+async def test_stale_idle_signed_url_cannot_confirm_new_play(
+    hass: HomeAssistant,
+    started_controller: tuple[NurserySootherController, RecordedCalls],
+) -> None:
+    """The previous idle URL cannot preempt Sonos's no-ID then signed events."""
+    controller, calls = started_controller
+    await controller.async_stop()
+    hass.config.internal_url = SONOS_BASE_URL
+    hass.states.async_set(
+        MEDIA_PLAYER,
+        "idle",
+        {
+            ATTR_SUPPORTED_FEATURES: int(SPEAKER_FEATURES),
+            ATTR_MEDIA_CONTENT_ID: SONOS_NURSERY_URL,
+        },
+    )
+    await hass.async_block_till_done()
+
+    @callback
+    def _record_play_without_state(call: ServiceCall) -> None:
+        calls.media.append(call)
+
+    hass.services.async_register(
+        "media_player", SERVICE_PLAY_MEDIA, _record_play_without_state
+    )
+    await controller.async_set_enabled(enabled=True)
+    play_context = _media_calls(calls, SERVICE_PLAY_MEDIA)[-1].context
+
+    hass.states.async_set(
+        MEDIA_PLAYER,
+        "playing",
+        {ATTR_SUPPORTED_FEATURES: int(SPEAKER_FEATURES)},
+        context=play_context,
+    )
+    await hass.async_block_till_done()
+    assert controller.state is SootherState.BASELINE
+
+    hass.states.async_set(
+        MEDIA_PLAYER,
+        "playing",
+        {
+            ATTR_SUPPORTED_FEATURES: int(SPEAKER_FEATURES),
+            ATTR_MEDIA_CONTENT_ID: SONOS_REFRESHED_NURSERY_URL,
+        },
+        context=Context(parent_id=play_context.id),
+    )
+    await hass.async_block_till_done()
+
+    assert controller.state is SootherState.BASELINE
+    assert controller.diagnostics["playback_owned"] is True
+    assert controller.diagnostics["playback_interrupted"] is False
+    assert await controller.async_boost()
+
+
+async def test_play_context_cannot_adopt_different_media(
+    hass: HomeAssistant,
+    started_controller: tuple[NurserySootherController, RecordedCalls],
+) -> None:
+    """A play-context refresh cannot make unchanged parent media ours."""
+    controller, calls = started_controller
+    await _restart_with_sonos_play_state(
+        hass,
+        controller,
+        calls,
+        media_content_id="x-sonos-vli:RINCON_TEST:2,spotify:parent-session",
+    )
+    stop_count = len(_media_calls(calls, SERVICE_MEDIA_STOP))
+
+    assert controller.state is SootherState.ATTENTION_REQUIRED
+    assert controller.diagnostics["playback_owned"] is False
+    await controller.async_stop()
+    assert len(_media_calls(calls, SERVICE_MEDIA_STOP)) == stop_count
+
+
+async def test_sonos_auth_signature_rotation_keeps_playback_owned(
+    hass: HomeAssistant,
+    started_controller: tuple[NurserySootherController, RecordedCalls],
+) -> None:
+    """A refreshed HA authSig cannot turn unchanged nursery media external."""
+    controller, calls = started_controller
+    await _restart_with_sonos_play_state(
+        hass,
+        controller,
+        calls,
+        media_content_id=SONOS_NURSERY_URL,
+    )
+    stop_count = len(_media_calls(calls, SERVICE_MEDIA_STOP))
+
+    hass.states.async_set(
+        MEDIA_PLAYER,
+        "playing",
+        {
+            ATTR_SUPPORTED_FEATURES: int(SPEAKER_FEATURES),
+            ATTR_MEDIA_CONTENT_ID: SONOS_REFRESHED_NURSERY_URL,
+        },
+    )
+    await hass.async_block_till_done()
+
+    assert controller.state is SootherState.BASELINE
+    assert controller.diagnostics["playback_owned"] is True
+    assert controller.diagnostics["playback_interrupted"] is False
+    assert len(_media_calls(calls, SERVICE_MEDIA_STOP)) == stop_count
+    assert await controller.async_boost()
+
+    await controller.async_stop()
+
+    assert len(_media_calls(calls, SERVICE_MEDIA_STOP)) == stop_count + 1
+
+
+async def test_user_replaying_same_local_file_is_external(
+    hass: HomeAssistant,
+    started_controller: tuple[NurserySootherController, RecordedCalls],
+) -> None:
+    """An explicit user context distinguishes a manual same-file replay."""
+    controller, calls = started_controller
+    await _restart_with_sonos_play_state(
+        hass,
+        controller,
+        calls,
+        media_content_id=SONOS_NURSERY_URL,
+    )
+    stop_count = len(_media_calls(calls, SERVICE_MEDIA_STOP))
+
+    hass.states.async_set(
+        MEDIA_PLAYER,
+        "playing",
+        {
+            ATTR_SUPPORTED_FEATURES: int(SPEAKER_FEATURES),
+            ATTR_MEDIA_CONTENT_ID: SONOS_REFRESHED_NURSERY_URL,
+        },
+        context=Context(user_id="parent-user"),
+    )
+    await hass.async_block_till_done()
+
+    assert controller.state is SootherState.ATTENTION_REQUIRED
+    await controller.async_stop()
+    assert len(_media_calls(calls, SERVICE_MEDIA_STOP)) == stop_count
+
+
+async def test_pending_user_replay_of_same_file_is_external(
+    hass: HomeAssistant,
+    started_controller: tuple[NurserySootherController, RecordedCalls],
+) -> None:
+    """A user replay cannot claim the pending nursery playback generation."""
+    controller, calls = started_controller
+    await _restart_with_sonos_play_state(
+        hass,
+        controller,
+        calls,
+        media_content_id=None,
+    )
+    stop_count = len(_media_calls(calls, SERVICE_MEDIA_STOP))
+
+    hass.states.async_set(
+        MEDIA_PLAYER,
+        "playing",
+        {
+            ATTR_SUPPORTED_FEATURES: int(SPEAKER_FEATURES),
+            ATTR_MEDIA_CONTENT_ID: SONOS_REFRESHED_NURSERY_URL,
+        },
+        context=Context(user_id="parent-user"),
+    )
+    await hass.async_block_till_done()
+
+    assert controller.state is SootherState.ATTENTION_REQUIRED
+    assert controller.diagnostics["playback_owned"] is False
+    await controller.async_stop()
+    assert len(_media_calls(calls, SERVICE_MEDIA_STOP)) == stop_count
+
+
+@pytest.mark.parametrize(
+    "replacement_id",
+    [
+        "http://192.0.2.1:8123/media/local/parent-music.mp3?authSig=other",
+        (
+            "http://192.0.2.1:8123/media/local/white-noise.mp3"
+            "?authSig=refreshed&variant=parent"
+        ),
+        "http://198.51.100.1:8123/media/local/white-noise.mp3?authSig=other-host",
+        "//evil.example/media/local/white-noise.mp3?authSig=other-host",
+    ],
+)
+async def test_sonos_different_local_media_identity_is_external(
+    hass: HomeAssistant,
+    started_controller: tuple[NurserySootherController, RecordedCalls],
+    replacement_id: str,
+) -> None:
+    """Only the exact HA local path and non-auth query remain owned."""
+    controller, calls = started_controller
+    await _restart_with_sonos_play_state(
+        hass,
+        controller,
+        calls,
+        media_content_id=SONOS_NURSERY_URL,
+    )
+    stop_count = len(_media_calls(calls, SERVICE_MEDIA_STOP))
+    volume_count = len(_media_calls(calls, SERVICE_VOLUME_SET))
+
+    hass.states.async_set(
+        MEDIA_PLAYER,
+        "playing",
+        {
+            ATTR_SUPPORTED_FEATURES: int(SPEAKER_FEATURES),
+            ATTR_MEDIA_CONTENT_ID: replacement_id,
+        },
+    )
+    await hass.async_block_till_done()
+
+    assert controller.state is SootherState.ATTENTION_REQUIRED
+    await controller.async_stop()
+    assert len(_media_calls(calls, SERVICE_MEDIA_STOP)) == stop_count
+    assert len(_media_calls(calls, SERVICE_VOLUME_SET)) == volume_count
+
+
+async def test_sonos_spotify_takeover_is_never_stopped_or_volume_changed(
+    hass: HomeAssistant,
+    started_controller: tuple[NurserySootherController, RecordedCalls],
+) -> None:
+    """A genuinely different Sonos source still relinquishes playback safely."""
+    controller, calls = started_controller
+    await _restart_with_sonos_play_state(
+        hass,
+        controller,
+        calls,
+        media_content_id=SONOS_NURSERY_URL,
+    )
+    stop_count = len(_media_calls(calls, SERVICE_MEDIA_STOP))
+    volume_count = len(_media_calls(calls, SERVICE_VOLUME_SET))
+    volume_context = _media_calls(calls, SERVICE_VOLUME_SET)[-1].context
+
+    hass.states.async_set(
+        MEDIA_PLAYER,
+        "playing",
+        {
+            ATTR_SUPPORTED_FEATURES: int(SPEAKER_FEATURES),
+            ATTR_MEDIA_CONTENT_ID: "x-sonos-vli:RINCON_TEST:2,spotify:parent-session",
+            "source": "Spotify Connect",
+            "media_title": "Parent music",
+        },
+        context=volume_context,
+    )
+    await hass.async_block_till_done()
+
+    assert controller.state is SootherState.ATTENTION_REQUIRED
+    assert controller.recommendation is Recommendation.CHECK_DEVICES
+    assert controller.diagnostics["playback_owned"] is False
+    with pytest.raises(ServiceValidationError):
+        await controller.async_boost()
+    with pytest.raises(ServiceValidationError):
+        await controller.async_baseline()
+    await controller.async_stop()
+    assert len(_media_calls(calls, SERVICE_MEDIA_STOP)) == stop_count
+    assert len(_media_calls(calls, SERVICE_VOLUME_SET)) == volume_count
+
+
 async def test_external_media_replacement_is_not_stopped(
     hass: HomeAssistant,
     started_controller: tuple[NurserySootherController, RecordedCalls],
@@ -878,6 +1202,31 @@ async def test_external_media_replacement_is_not_stopped(
     await controller.async_stop()
 
     assert controller.state is SootherState.DISABLED
+    assert len(_media_calls(calls, SERVICE_MEDIA_STOP)) == stop_count
+
+
+async def test_paused_external_media_is_not_restarted(
+    hass: HomeAssistant,
+    started_controller: tuple[NurserySootherController, RecordedCalls],
+) -> None:
+    """A paused parent item cannot be overwritten by the playback watchdog."""
+    controller, calls = started_controller
+    play_count = len(_media_calls(calls, SERVICE_PLAY_MEDIA))
+    stop_count = len(_media_calls(calls, SERVICE_MEDIA_STOP))
+
+    hass.states.async_set(
+        MEDIA_PLAYER,
+        "paused",
+        {
+            ATTR_SUPPORTED_FEATURES: int(SPEAKER_FEATURES),
+            ATTR_MEDIA_CONTENT_ID: "resolved://parent-music",
+        },
+    )
+    await hass.async_block_till_done()
+
+    assert controller.state is SootherState.ATTENTION_REQUIRED
+    assert len(_media_calls(calls, SERVICE_PLAY_MEDIA)) == play_count
+    await controller.async_stop()
     assert len(_media_calls(calls, SERVICE_MEDIA_STOP)) == stop_count
 
 
@@ -1235,7 +1584,9 @@ async def test_arbitrary_play_failure_is_isolated_and_compensated(
             "playing",
             {
                 ATTR_SUPPORTED_FEATURES: int(SPEAKER_FEATURES),
-                ATTR_MEDIA_CONTENT_ID: "resolved://white-noise",
+                ATTR_MEDIA_CONTENT_ID: (
+                    "/media/local/white-noise.mp3?authSig=failed-play"
+                ),
             },
             context=call.context,
         )
@@ -1272,6 +1623,15 @@ async def test_immediate_play_rejection_does_not_stop_parent_media(
     @callback
     def _reject_play(call: ServiceCall) -> None:
         calls.media.append(call)
+        hass.states.async_set(
+            MEDIA_PLAYER,
+            "playing",
+            {
+                ATTR_SUPPORTED_FEATURES: int(SPEAKER_FEATURES),
+                ATTR_MEDIA_CONTENT_ID: "resolved://parent-music",
+            },
+            context=call.context,
+        )
         error_message = "speaker rejected play before changing state"
         raise RuntimeError(error_message)
 
@@ -1318,7 +1678,7 @@ async def test_delayed_non_timeout_play_failure_is_compensated(
             ATTR_MEDIA_CONTENT_ID: CONFIG_DATA[CONF_WHITE_NOISE][ATTR_MEDIA_CONTENT_ID],
             "media_title": "late white noise",
         },
-        context=failed_context,
+        context=Context(parent_id=failed_context.id),
     )
     await hass.async_block_till_done()
 
@@ -1404,7 +1764,7 @@ async def test_timed_out_play_keeps_compensation_listener_until_stopped(
         "playing",
         {
             ATTR_SUPPORTED_FEATURES: int(SPEAKER_FEATURES),
-            ATTR_MEDIA_CONTENT_ID: "resolved://late-white-noise",
+            ATTR_MEDIA_CONTENT_ID: CONFIG_DATA[CONF_WHITE_NOISE][ATTR_MEDIA_CONTENT_ID],
         },
         context=failed_context,
     )
@@ -1443,7 +1803,7 @@ async def test_stale_idle_event_cannot_consume_late_play_compensation(
         "playing",
         {
             ATTR_SUPPORTED_FEATURES: int(SPEAKER_FEATURES),
-            ATTR_MEDIA_CONTENT_ID: "resolved://late-white-noise",
+            ATTR_MEDIA_CONTENT_ID: CONFIG_DATA[CONF_WHITE_NOISE][ATTR_MEDIA_CONTENT_ID],
         },
         context=failed_context,
     )

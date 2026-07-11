@@ -252,6 +252,16 @@ later Baseline, Boost, or live number-setting effects. Stop then disables the
 policy without stopping the parent's replacement media; explicitly turning the
 switch off and on starts a fresh baseline session.
 
+Playback ownership uses the configured Home Assistant local-media identity,
+not the media player's transient raw URL. Home Assistant may resolve
+`media-source://media_source/...` to a signed `/media/...` URL and refresh its
+`authSig` while the same item continues. The controller compares the exact Home
+Assistant origin, media path, fragment, and all non-signature query fields,
+ignoring only `authSig`. A state without a usable media ID remains unverified
+and cannot authorize Boost, Baseline, Stop, or live volume effects. A different
+path, origin, non-signature query, or explicit user replay relinquishes
+ownership.
+
 When a cry sensor, camera, speaker, or notification target becomes unknown,
 unavailable, or missing, the controller:
 
