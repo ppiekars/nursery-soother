@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
 from datetime import timedelta
 from typing import TYPE_CHECKING
@@ -282,6 +283,107 @@ async def test_suggestions_debounce_never_increases_automatically(
     assert len(_media_calls(calls, SERVICE_VOLUME_SET)) == initial_volume_calls
 
 
+async def test_simulated_cry_uses_real_debounce_and_quiet_paths(
+    hass: HomeAssistant,
+    started_controller: tuple[NurserySootherController, RecordedCalls],
+) -> None:
+    """The diagnostic input exercises policy without changing the real sensor."""
+    controller, calls = started_controller
+    initial_volume_calls = len(_media_calls(calls, SERVICE_VOLUME_SET))
+
+    await controller.async_set_simulated_cry(enabled=True)
+    assert controller.simulated_cry is True
+    assert controller.state is SootherState.CRY_PENDING
+    assert controller.recommendation is Recommendation.WAIT
+
+    await _advance(hass, 11)
+
+    assert controller.recommendation is Recommendation.BOOST
+    assert len(_incident_notifications(calls)) == PARENT_COUNT
+    assert len(_media_calls(calls, SERVICE_VOLUME_SET)) == initial_volume_calls
+
+    await controller.async_set_simulated_cry(enabled=False)
+
+    assert controller.simulated_cry is False
+    assert controller.state is SootherState.SETTLING
+    assert controller.recommendation is Recommendation.SETTLING
+
+
+async def test_stop_clears_simulated_cry_and_disabled_simulation_is_rejected(
+    started_controller: tuple[NurserySootherController, RecordedCalls],
+) -> None:
+    """A diagnostic cry cannot leak into a disabled or later session."""
+    controller, _ = started_controller
+    await controller.async_set_simulated_cry(enabled=True)
+
+    await controller.async_stop()
+
+    assert controller.simulated_cry is False
+    assert controller.state is SootherState.DISABLED
+    with pytest.raises(ServiceValidationError):
+        await controller.async_set_simulated_cry(enabled=True)
+
+
+async def test_simulated_cry_off_cannot_hide_dependency_outage(
+    hass: HomeAssistant,
+    started_controller: tuple[NurserySootherController, RecordedCalls],
+) -> None:
+    """Changing the simulated input cannot replace a fail-safe recommendation."""
+    controller, _ = started_controller
+    await controller.async_set_simulated_cry(enabled=True)
+
+    hass.states.async_set(CAMERA, STATE_UNAVAILABLE)
+    await hass.async_block_till_done()
+
+    assert controller.state is SootherState.ATTENTION_REQUIRED
+    assert controller.recommendation is Recommendation.CHECK_DEVICES
+    assert not controller.dependencies_available
+
+    await controller.async_set_simulated_cry(enabled=False)
+
+    assert controller.simulated_cry is False
+    assert controller.state is SootherState.ATTENTION_REQUIRED
+    assert controller.recommendation is Recommendation.CHECK_DEVICES
+    assert controller.diagnostics["timers"]["settling"] is False
+
+    hass.states.async_set(CAMERA, "idle")
+    await hass.async_block_till_done()
+
+    assert controller.dependencies_available
+    assert controller.state is SootherState.BASELINE
+    assert controller.recommendation is Recommendation.NONE
+
+
+async def test_simulated_and_physical_cry_start_race_emits_one_edge(
+    hass: HomeAssistant,
+    started_controller: tuple[NurserySootherController, RecordedCalls],
+) -> None:
+    """Concurrent aggregate inputs cannot lose or duplicate the cry edge."""
+    controller, _ = started_controller
+    episode = controller._episode  # noqa: SLF001
+
+    async with controller._lock:  # noqa: SLF001
+        simulated_task = asyncio.create_task(
+            controller.async_set_simulated_cry(enabled=True)
+        )
+        await asyncio.sleep(0)
+        hass.states.async_set(CRY_SENSOR, "on")
+
+    await simulated_task
+    await hass.async_block_till_done()
+
+    assert controller.state is SootherState.CRY_PENDING
+    assert controller.recommendation is Recommendation.WAIT
+    assert controller.diagnostics["timers"]["debounce"] is True
+    assert controller._episode == episode + 1  # noqa: SLF001
+
+    await controller.async_set_simulated_cry(enabled=False)
+    assert controller.state is SootherState.CRY_PENDING
+
+    await _set_cry(hass, "off")
+    assert controller.state is SootherState.BASELINE
+
+
 async def test_false_alarm_cancels_debounce(
     hass: HomeAssistant,
     started_controller: tuple[NurserySootherController, RecordedCalls],
@@ -433,19 +535,80 @@ async def test_cry_resuming_during_boost_only_suggests_observation(
     } == {"Baseline", "Acknowledge", "Stop"}
 
 
-async def test_cooldown_rejects_repeat_boost(
+async def test_manual_baseline_resets_boost_cooldown(
     started_controller: tuple[NurserySootherController, RecordedCalls],
 ) -> None:
-    """A second boost inside cooldown produces no increase."""
+    """An explicit Baseline lets the parent apply another bounded boost."""
     controller, calls = started_controller
 
     assert await controller.async_boost()
     await controller.async_baseline()
     volume_count = len(_media_calls(calls, SERVICE_VOLUME_SET))
 
+    assert await controller.async_boost()
+    assert controller.state is SootherState.BOOST
+    assert controller.recommendation is Recommendation.OBSERVE
+    assert len(_media_calls(calls, SERVICE_VOLUME_SET)) == volume_count + 1
+
+
+async def test_fresh_enabled_session_resets_boost_cooldown(
+    started_controller: tuple[NurserySootherController, RecordedCalls],
+) -> None:
+    """Stop and re-enable cannot inherit a previous session's cooldown."""
+    controller, _ = started_controller
+    assert await controller.async_boost()
+
+    await controller.async_stop()
+    await controller.async_set_enabled(enabled=True)
+
+    assert await controller.async_boost()
+    assert controller.state is SootherState.BOOST
+
+
+async def test_automatic_settling_retains_and_expires_cooldown_recommendation(
+    hass: HomeAssistant,
+    started_controller: tuple[NurserySootherController, RecordedCalls],
+) -> None:
+    """Automatic baseline retains rate limiting without a stale recommendation."""
+    controller, calls = started_controller
+    assert await controller.async_boost()
+    await _advance(hass, 21)
+    assert controller.state is SootherState.BASELINE
+    volume_count = len(_media_calls(calls, SERVICE_VOLUME_SET))
+
     assert not await controller.async_boost()
     assert controller.recommendation is Recommendation.COOLDOWN
+    assert controller.diagnostics["timers"]["cooldown"] is True
     assert len(_media_calls(calls, SERVICE_VOLUME_SET)) == volume_count
+
+    await _advance(hass, 31)
+
+    assert controller.state is SootherState.BASELINE
+    assert controller.recommendation is Recommendation.NONE
+    assert controller.diagnostics["timers"]["cooldown"] is False
+
+
+async def test_intervening_transition_replaces_cooldown_restore_target(
+    hass: HomeAssistant,
+    started_controller: tuple[NurserySootherController, RecordedCalls],
+) -> None:
+    """Cooldown expiry cannot restore a recommendation from an older state."""
+    controller, _ = started_controller
+    assert await controller.async_boost()
+    await _advance(hass, 21)
+    assert not await controller.async_boost()
+    assert controller.diagnostics["timers"]["cooldown"] is True
+
+    await controller.async_acknowledge()
+
+    assert controller.recommendation is Recommendation.ACKNOWLEDGED
+    assert controller.diagnostics["timers"]["cooldown"] is False
+    assert not await controller.async_boost()
+    assert controller.recommendation is Recommendation.COOLDOWN
+
+    await _advance(hass, 31)
+
+    assert controller.recommendation is Recommendation.ACKNOWLEDGED
 
 
 async def test_acknowledge_from_one_parent_cancels_attention(

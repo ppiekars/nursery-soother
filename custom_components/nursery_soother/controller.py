@@ -115,6 +115,8 @@ class NurserySootherController:
         self.recommendation = Recommendation.ENABLE
         self._acknowledged = False
         self._boosted = False
+        self._simulated_cry = False
+        self._cry_input_active = False
         self._episode = 0
         self._session_id = secrets.token_hex(8)
         self._incident_active = False
@@ -126,6 +128,7 @@ class NurserySootherController:
         self._listeners: set[ControllerListener] = set()
         self._unsubscribers: list[CALLBACK_TYPE] = []
         self._cancel_debounce: CALLBACK_TYPE | None = None
+        self._cancel_cooldown: CALLBACK_TYPE | None = None
         self._cancel_escalation: CALLBACK_TYPE | None = None
         self._cancel_settling: CALLBACK_TYPE | None = None
         self._dependency_issues: set[str] = set()
@@ -169,6 +172,11 @@ class NurserySootherController:
         return self.state is SootherState.ATTENTION_REQUIRED and not self._acknowledged
 
     @property
+    def simulated_cry(self) -> bool:
+        """Return whether the diagnostic cry input is active."""
+        return self._simulated_cry
+
+    @property
     def notification_tag(self) -> str:
         """Return the stable notification replacement tag for this entry."""
         return f"{NOTIFICATION_TAG_PREFIX}-{self.entry.entry_id}"
@@ -185,10 +193,12 @@ class NurserySootherController:
             "dependency_issue_types": sorted(self._dependency_issues),
             "acknowledged": self._acknowledged,
             "boosted": self._boosted,
+            "simulated_cry": self._simulated_cry,
             "playback_owned": self._owns_playback,
             "playback_interrupted": self._playback_interrupted,
             "timers": {
                 "debounce": self._cancel_debounce is not None,
+                "cooldown": self._cancel_cooldown is not None,
                 "escalation": self._cancel_escalation is not None,
                 "settling": self._cancel_settling is not None,
                 "failed_play_compensation": bool(self._failed_play_context_ids),
@@ -287,6 +297,18 @@ class NurserySootherController:
         else:
             await self.async_stop()
 
+    async def async_set_simulated_cry(self, *, enabled: bool) -> None:
+        """Set the diagnostic cry input through the normal response path."""
+        async with self._lock:
+            self._ensure_started()
+            if self._simulated_cry is enabled:
+                return
+            if enabled:
+                self._validate_controllable()
+            self._simulated_cry = enabled
+            self._reconcile_cry_input()
+            self._emit_update()
+
     async def _async_enable(self) -> None:
         """Enable baseline playback and start a fresh response episode."""
         async with self._lock:
@@ -307,6 +329,7 @@ class NurserySootherController:
             self.settings.enabled = True
             self._persist_settings()
             self._new_episode()
+            self._reset_boost_cooldown()
             self._dependency_issues = self._find_dependency_issues()
             if self._dependency_issues:
                 self._transition(
@@ -329,7 +352,8 @@ class NurserySootherController:
             self.settings.enabled = False
             self._persist_settings()
             self._new_episode()
-            self._cancel_all_timers()
+            self._reset_boost_cooldown()
+            self._simulated_cry = False
             self._transition(
                 SootherState.DISABLED, Recommendation.ENABLE, "stopped by parent"
             )
@@ -358,9 +382,11 @@ class NurserySootherController:
                 and (now - self._last_boost_at).total_seconds()
                 < self.settings.cooldown_seconds
             ):
+                previous_recommendation = self.recommendation
                 self._transition(
                     self.state, Recommendation.COOLDOWN, "boost rejected by cooldown"
                 )
+                self._schedule_cooldown_expiry(now, previous_recommendation)
                 return False
 
             self._new_episode()
@@ -395,6 +421,7 @@ class NurserySootherController:
             self._acknowledged = self._cry_is_on()
             if not await self._async_set_speaker_volume(self.settings.baseline_volume):
                 return
+            self._reset_boost_cooldown()
             if self._cry_is_on():
                 self._transition(
                     SootherState.CRY_PENDING,
@@ -481,7 +508,8 @@ class NurserySootherController:
         )
         if not await self._async_ensure_playback():
             return
-        if self._cry_is_on():
+        self._cry_input_active = self._cry_is_on()
+        if self._cry_input_active:
             self._begin_cry_pending(new_episode=True)
 
     async def _async_state_changed(self, event: Event[EventStateChangedData]) -> None:
@@ -514,12 +542,22 @@ class NurserySootherController:
 
     def _handle_cry_state_changed(self, event: Event[EventStateChangedData]) -> None:
         """Handle only concrete cry state edges, not attribute updates."""
-        old_state = event.data.get("old_state")
-        old_cry_is_on = old_state is not None and old_state.state == STATE_ON
-        cry_is_on = self._cry_is_on()
-        if old_cry_is_on == cry_is_on:
+        del event
+        self._reconcile_cry_input()
+
+    def _reconcile_cry_input(self) -> None:
+        """Process one aggregate edge across physical and diagnostic inputs."""
+        cry_input_active = self._cry_is_on()
+        if cry_input_active == self._cry_input_active:
             return
-        if cry_is_on:
+        self._cry_input_active = cry_input_active
+        if (
+            not self.enabled
+            or self._playback_interrupted
+            or not self.dependencies_available
+        ):
+            return
+        if cry_input_active:
             self._async_cry_started()
         else:
             self._async_cry_stopped()
@@ -782,6 +820,40 @@ class NurserySootherController:
             self.hass, self.settings.settling_seconds, _expired
         )
         self._cancel_settling = cancel_callback
+
+    def _schedule_cooldown_expiry(
+        self, now: datetime, previous_recommendation: Recommendation
+    ) -> None:
+        """Restore the prior recommendation when the cooldown becomes eligible."""
+        if self._cancel_cooldown is not None or self._last_boost_at is None:
+            return
+        accepted_boost_at = self._last_boost_at
+        remaining = max(
+            0.0,
+            self.settings.cooldown_seconds - (now - accepted_boost_at).total_seconds(),
+        )
+        cancel_callback: CALLBACK_TYPE | None = None
+
+        async def _expired(expired_at: datetime) -> None:
+            del expired_at
+            async with self._lock:
+                if self._cancel_cooldown is not cancel_callback:
+                    return
+                self._cancel_cooldown = None
+                if (
+                    not self._started
+                    or self._last_boost_at != accepted_boost_at
+                    or self.recommendation is not Recommendation.COOLDOWN
+                ):
+                    return
+                self._transition(
+                    self.state,
+                    previous_recommendation,
+                    "boost cooldown elapsed",
+                )
+
+        cancel_callback = async_call_later(self.hass, remaining, _expired)
+        self._cancel_cooldown = cancel_callback
 
     async def _async_notification_action(self, event: Event[dict[str, Any]]) -> None:
         """Accept only current actions belonging to this entry and episode."""
@@ -1560,6 +1632,8 @@ class NurserySootherController:
 
     def _cry_is_on(self) -> bool:
         """Return whether the cry input is explicitly on."""
+        if self._simulated_cry:
+            return True
         if self.cry_sensor is None:
             return False
         state: State | None = self.hass.states.get(self.cry_sensor)
@@ -1611,8 +1685,14 @@ class NurserySootherController:
     def _cancel_all_timers(self) -> None:
         """Cancel all response timers."""
         self._cancel_timer("debounce")
+        self._cancel_timer("cooldown")
         self._cancel_timer("escalation")
         self._cancel_timer("settling")
+
+    def _reset_boost_cooldown(self) -> None:
+        """Start a fresh parent-controlled baseline or enabled session."""
+        self._last_boost_at = None
+        self._cancel_timer("cooldown")
 
     def _cancel_timer(self, timer: str) -> None:
         """Cancel one named response timer."""
@@ -1635,6 +1715,8 @@ class NurserySootherController:
         reason: str,
     ) -> None:
         """Apply one state transition and notify every entity."""
+        if recommendation is not Recommendation.COOLDOWN:
+            self._cancel_timer("cooldown")
         self.state = state
         self.recommendation = recommendation
         self._last_reason = reason

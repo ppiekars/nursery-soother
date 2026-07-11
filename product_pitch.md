@@ -170,6 +170,7 @@ The first version should focus on the smallest reliable product:
 * acknowledgement from either parent;
 * automatic return to baseline;
 * standard Home Assistant entities;
+* a diagnostic simulated-cry control;
 * diagnostics and unit-tested state transitions.
 
 Later releases could add:

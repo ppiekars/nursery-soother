@@ -123,6 +123,9 @@
     "switch": {
       "enabled": {
         "name": "Enabled"
+      },
+      "simulated_cry": {
+        "name": "Simulated cry"
       }
     },
     "number": {

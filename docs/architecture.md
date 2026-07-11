@@ -212,9 +212,17 @@ expires cancels that timer and resumes the same episode without an automatic
 increase.
 
 Uninterrupted quiet for the complete settling period sets baseline volume,
-ends the episode, and invalidates its notification actions. Boost cooldown is
-measured from the last accepted boost and rejects another boost until the
-configured interval has elapsed. It never changes volume by itself.
+ends the episode, and invalidates its notification actions. After an automatic
+baseline return, Boost cooldown is measured from the last accepted boost and
+rejects another boost until the configured interval has elapsed. Its temporary
+recommendation clears when the interval expires. A successful parent-selected
+Baseline, Stop, or fresh Enable resets cooldown because those actions establish
+a new explicit control boundary.
+
+The diagnostic Simulated cry switch contributes a virtual cry input alongside
+the configured sensor. Turning it on and off uses the same debounce, settling,
+notification, and escalation state machine as physical sensor edges. It cannot
+be enabled while the controller is disabled or unsafe, and Stop clears it.
 
 ## Timer and concurrency rules
 
@@ -300,7 +308,7 @@ than polling.
 
 | Platform | Entities | Behavior |
 | --- | --- | --- |
-| `switch` | Enabled | Turn on starts baseline playback; turn off performs Stop |
+| `switch` | Enabled, Simulated cry | Start/stop the policy or inject a diagnostic cry input |
 | `sensor` | State, Recommendation | Read-only enum state from controller memory |
 | `binary_sensor` | Attention required | True only when parent attention is currently requested |
 | `number` | Baseline, Boost, Maximum volume | Persist validated percentage options |

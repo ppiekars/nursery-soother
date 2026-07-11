@@ -45,7 +45,7 @@ CONFIG_DATA = {
     CONF_CAMERA: "camera.nursery",
     CONF_MEDIA_PLAYER: "media_player.nursery",
 }
-ENTITY_COUNT = 11
+ENTITY_COUNT = 12
 FUNCTIONAL_CONFIG_DATA = CONFIG_DATA | {
     CONF_WHITE_NOISE: {
         "media_content_id": "media-source://media_source/local/white-noise.mp3",

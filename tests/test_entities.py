@@ -54,6 +54,7 @@ class _FakeController:
         self.recommendation = Recommendation.OBSERVE
         self.attention_required = False
         self.enabled = False
+        self.simulated_cry = False
         self.settings = _FakeSettings()
         self.configured = True
         self.dependencies_available = True
@@ -78,6 +79,12 @@ class _FakeController:
         """Record and apply an enabled change."""
         self.calls.append(("set_enabled", enabled))
         self.enabled = enabled
+        self.emit()
+
+    async def async_set_simulated_cry(self, *, enabled: bool) -> None:
+        """Record and apply a diagnostic cry change."""
+        self.calls.append(("set_simulated_cry", enabled))
+        self.simulated_cry = enabled
         self.emit()
 
     async def async_boost(self) -> None:
@@ -154,6 +161,7 @@ async def test_shared_metadata_availability_and_listener_lifecycle(
             "recommendation",
             "attention_required",
             "enabled",
+            "simulated_cry",
             CONF_BASELINE_VOLUME,
             CONF_BOOST_VOLUME,
             CONF_MAX_VOLUME,
@@ -253,21 +261,35 @@ async def test_enabled_switch_delegates_to_controller(
     entry: MockConfigEntry,
     controller: _FakeController,
 ) -> None:
-    """The config switch delegates enable and disable operations."""
-    entities: list[switch_platform.NurserySootherEnabledSwitch] = []
+    """Configuration and diagnostic switches delegate controller operations."""
+    entities: list[
+        switch_platform.NurserySootherEnabledSwitch
+        | switch_platform.NurserySootherSimulatedCrySwitch
+    ] = []
     await switch_platform.async_setup_entry(hass, entry, entities.extend)
-    entity = entities[0]
+    by_key = {entity.entity_description.key: entity for entity in entities}
+    enabled = by_key["enabled"]
+    simulated_cry = by_key["simulated_cry"]
 
-    assert entity.entity_description.translation_key == "enabled"
-    assert entity.entity_category is EntityCategory.CONFIG
-    assert entity.is_on is False
+    assert enabled.entity_description.translation_key == "enabled"
+    assert enabled.entity_category is EntityCategory.CONFIG
+    assert enabled.is_on is False
+    assert simulated_cry.entity_description.translation_key == "simulated_cry"
+    assert simulated_cry.entity_category is EntityCategory.CONFIG
+    assert simulated_cry.is_on is False
 
-    await entity.async_turn_on()
-    assert entity.is_on is True
-    await entity.async_turn_off()
-    assert entity.is_on is False
+    await enabled.async_turn_on()
+    assert enabled.is_on is True
+    await simulated_cry.async_turn_on()
+    assert simulated_cry.is_on is True
+    await simulated_cry.async_turn_off()
+    assert simulated_cry.is_on is False
+    await enabled.async_turn_off()
+    assert enabled.is_on is False
     assert controller.calls == [
         ("set_enabled", True),
+        ("set_simulated_cry", True),
+        ("set_simulated_cry", False),
         ("set_enabled", False),
     ]
 
