@@ -59,6 +59,9 @@ _TIMER_KEYS = (
 )
 _LOCAL_MEDIA_PREFIX = "media-source://media_source/local/"
 _MOBILE_NOTIFY_PREFIX = "notify.mobile_app_"
+_LEGACY_ENTRY_VERSION = 4
+_LEGACY_DEFAULT_DEBOUNCE_SECONDS = 10
+_LEGACY_DEFAULT_LEVEL_UP_SECONDS = 30
 
 
 def _validate_entry_device_ownership(
@@ -115,7 +118,7 @@ def _functional_data_is_valid(entry: ConfigEntry[Any]) -> bool:
 
 
 def _validate_entry_data(hass: HomeAssistant, entry: ConfigEntry[Any]) -> None:
-    """Validate persisted v4 data independently of the config flow."""
+    """Validate persisted v5 data independently of the config flow."""
     for config_key, expected_domain in ENTITY_DOMAINS.items():
         entity_id = entry.data.get(config_key)
         if not isinstance(entity_id, str) or not valid_entity_id(entity_id):
@@ -173,9 +176,30 @@ def _validate_entry_data(hass: HomeAssistant, entry: ConfigEntry[Any]) -> None:
 
 
 async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry[Any]) -> bool:
-    """Accept only entries already created with the clean v4 contract."""
-    del hass
-    return entry.version == ENTRY_VERSION
+    """Move v4 default timings to the responsive v5 policy."""
+    if entry.version == ENTRY_VERSION:
+        return True
+    if entry.version != _LEGACY_ENTRY_VERSION:
+        return False
+
+    options = dict(entry.options)
+    if (
+        options.get(CONF_DEBOUNCE_SECONDS, _LEGACY_DEFAULT_DEBOUNCE_SECONDS)
+        == _LEGACY_DEFAULT_DEBOUNCE_SECONDS
+    ):
+        options[CONF_DEBOUNCE_SECONDS] = DEFAULT_OPTIONS[CONF_DEBOUNCE_SECONDS]
+    if (
+        options.get(CONF_LEVEL_UP_SECONDS, _LEGACY_DEFAULT_LEVEL_UP_SECONDS)
+        == _LEGACY_DEFAULT_LEVEL_UP_SECONDS
+    ):
+        options[CONF_LEVEL_UP_SECONDS] = DEFAULT_OPTIONS[CONF_LEVEL_UP_SECONDS]
+
+    hass.config_entries.async_update_entry(
+        entry,
+        options=options,
+        version=ENTRY_VERSION,
+    )
+    return True
 
 
 async def async_setup_entry(

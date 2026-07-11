@@ -27,7 +27,7 @@ Use semantic versions. Keep the version in
 `custom_components/nursery_soother/manifest.json` aligned with the published
 release and project metadata.
 
-Create a matching GitHub release tag such as `v0.3.0`. HACS does not treat a
+Create a matching GitHub release tag such as `v0.4.0`. HACS does not treat a
 tag without a published GitHub release as a release. Do not publish the tag
 until the exact commit has passed automated validation and the live Home
 Assistant smoke test.
@@ -48,14 +48,15 @@ Every release in this product line retains these safety semantics:
   while all active levels point to the same MP3;
 - off-to-on cry transitions are event samples; one short falling edge is not
   treated as a settled child;
-- confirmation uses three events or ten cumulative active seconds in a
-  30-second window after the configured debounce, which defaults to ten
+- initial confirmation uses two events or eight cumulative active seconds in a
+  30-second window after the configured debounce, which defaults to eight
   seconds;
 - a 60-second no-event gap closes the active cry episode;
 - manual mode recommends one exact next level and never changes it;
 - Automatic operation changes upward only, exactly one level per decision;
-- each subsequent automatic increase waits at least 30 seconds and requires
-  fresh post-change evidence;
+- each subsequent response decision waits at least 20 seconds and requires one
+  fresh event or six fresh active seconds; automatic mode applies the next
+  level while manual mode only suggests it;
 - both modes step down one level after each uninterrupted 120-second quiet
   interval and stop downshifting at Baseline;
 - a fixed 150-second deadline from episode confirmation enters Standby and
@@ -89,10 +90,11 @@ The test suite must cover:
 - all six volume entities and monotonic/Maximum validation;
 - rising-edge event counting and duplicate-state suppression;
 - rolling 30-second evidence expiry;
-- three-event and ten-active-second confirmation paths;
-- the default ten-second confirmation debounce and 60-second event gap;
+- two-event and eight-active-second initial confirmation paths;
+- one-event and six-active-second continuing-stage paths;
+- the default eight-second confirmation debounce and 60-second event gap;
 - manual exact-level suggestion without any volume action;
-- automatic one-level increase, 30-second dwell, fresh-evidence boundary, and
+- automatic one-level increase, 20-second dwell, fresh-evidence boundary, and
   Level 4 ceiling;
 - one-level quiet downshift every 120 seconds in both modes;
 - attention at 150 seconds from confirmation, including cancellation on event
@@ -163,10 +165,10 @@ against a sleeping child or an unverified speaker.
 1. Select Baseline and leave Automatic operation off.
 2. Produce one short cry pulse. Confirm it is recorded as one event but does
    not immediately change the level.
-3. Produce three off-to-on pulses inside 30 seconds. With debounce configured
-   to its ten-second default, confirm no earlier decision and then a manual
+3. Produce two off-to-on pulses inside 30 seconds. With debounce configured
+   to its eight-second default, confirm no earlier decision and then a manual
    suggestion targeting Level 1.
-4. Repeat using fewer than three pulses whose cumulative on-time reaches ten
+4. Repeat using fewer than two pulses whose cumulative on-time reaches eight
    seconds. Confirm the alternate OR threshold qualifies.
 5. Space events so earlier evidence leaves the 30-second window. Confirm old
    evidence does not qualify.
@@ -182,9 +184,9 @@ against a sleeping child or an unverified speaker.
    evidence. Confirm exactly one increase to Level 1.
 2. Continue generating events used by the original evidence and confirm the
    controller does not immediately move again.
-3. Before 30 seconds of dwell, add fresh evidence and confirm no early increase.
-4. After dwell, add a newly qualifying evidence pattern and confirm exactly one
-   increase to Level 2.
+3. Before 20 seconds of dwell, add one fresh event and confirm no early increase.
+4. After dwell, confirm that the fresh event authorizes exactly one increase to
+   Level 2. Repeat with a held input to cover the six-active-second path.
 5. Repeat to Level 4. Confirm it never skips a level and never creates a level
    above Level 4.
 6. Turn Automatic operation off during an episode. Confirm future evidence
@@ -215,8 +217,10 @@ against a sleeping child or an unverified speaker.
 
 1. Press Simulate cry event after accepting the dashboard confirmation. Confirm
    one artificial event is added and clearly identified as a test.
-2. Press it enough times to qualify the count threshold and confirm it uses the
-   same manual or automatic path as physical events.
+2. Press it twice to qualify the initial count threshold and confirm it uses the
+   same manual or automatic path as physical events. After the first response,
+   verify that one fresh press can qualify the next decision only after the
+   post-response dwell.
 3. Repeat a pending episode while making each selected dependency unavailable
    in turn. Confirm there is no upward level change and remaining surfaces
    report the problem.

@@ -160,11 +160,12 @@ The initial defaults are intentionally low and conservative:
 | Level 3 volume | 25% | Third response level |
 | Level 4 volume | 30% | Highest policy level |
 | Maximum volume | 40% | Hard ceiling for every integration-issued volume command |
-| Confirmation debounce | 10 seconds | Default delay before a candidate cry can be confirmed |
-| Evidence threshold | 3 events or 10 active seconds | Required evidence inside the rolling window |
+| Confirmation debounce | 8 seconds | Default delay before an initial candidate cry can be confirmed |
+| Initial evidence threshold | 2 events or 8 active seconds | Required evidence for the first response in an episode |
+| Continuing evidence threshold | 1 fresh event or 6 fresh active seconds | Required post-response evidence for each later step |
 | Evidence window | 30 seconds | Window used for event count and active time |
 | Cry-event gap | 60 seconds | No-event interval that closes the active cry episode |
-| Level dwell | 30 seconds | Minimum time before another automatic increase |
+| Level dwell | 20 seconds | Minimum time before another response decision |
 | Quiet step-down | 120 seconds | Uninterrupted quiet required for each one-level decrease |
 | Attention timeout | 150 seconds | Fixed deadline from episode confirmation before Standby and caregiver attention |
 
@@ -180,6 +181,13 @@ Use the config entry's **Configure** action to change volumes and timing. Use
 **Reconfigure** to replace the cry sensor, camera, speaker, media source, or
 notification targets. Reconfiguration preserves parent intent but never
 changes a Standby entry into an active level.
+
+During v4 migration, stored timings exactly equal to the former defaults—10
+seconds for debounce and 30 seconds for level dwell—are interpreted as legacy
+defaults and changed to 8 and 20 seconds. This also applies if those exact
+values were deliberately selected, because stored intent is indistinguishable.
+Other timing values are preserved. The fixed 2/8 initial and 1/6 continuing
+evidence thresholds apply to every v5 entry.
 
 ## Entities and standard actions
 
@@ -211,11 +219,12 @@ contains the exact target such as `level_2`.
 While an active level is selected, press **Simulate cry event** to inject one
 artificial rising-edge event without changing the physical sensor. Repeated
 presses can exercise the same event-count, evidence-window, manual suggestion,
-and automatic level paths used by real detections. In Standby the test is a
+and automatic level paths used by real detections. Two presses can qualify the
+initial response; after that response, one fresh press can qualify a later
+decision once the post-response dwell has elapsed. In Standby the test is a
 no-op, just as physical events cannot start a session. The example dashboard
 asks for confirmation because an active-session test can send real
-notifications and, when automatic operation is enabled, can affect the
-speaker.
+notifications and, when automatic operation is enabled, can affect the speaker.
 
 ## Manual and automatic operation
 
@@ -228,12 +237,13 @@ replace it with a newer suggestion. Choosing the proposed level from the
 notification, dashboard, automation, or Siri calls the same guarded exact-level
 command. Ignoring the suggestion does not change speaker volume.
 
-With **Automatic operation on**, confirmation can advance one level. A later
-advance requires both the 30-second dwell and fresh post-change evidence;
-events that justified the previous change are never reused. Automatic
-operation cannot skip a level, exceed Level 4, bypass Maximum, leave Standby,
-or override a dependency or playback-ownership fault. A parent must select an
-active level before cry response monitoring begins.
+With **Automatic operation on**, initial confirmation can advance one level.
+A later advance requires both the 20-second dwell and either one fresh
+post-change event or six fresh active seconds; evidence that justified the
+previous change is never reused. Automatic operation cannot skip a level,
+exceed Level 4, bypass Maximum, leave Standby, or override a dependency or
+playback-ownership fault. A parent must select an active level before cry
+response monitoring begins.
 
 In both modes, each 120-second uninterrupted quiet interval moves down one
 level until Baseline. If the episode remains unresolved for 150 seconds from
@@ -243,14 +253,16 @@ attention deadline.
 
 ## Parent notifications
 
-Manual suggestions include the evidence summary, current level, exact proposed
-level, and camera link. Automatic notifications state the level change and its
-reason. Attention and device-failure notifications prioritize **Open camera**
-and an exact safe level such as Standby.
+Manual suggestions include the evidence summary, current level, and exact
+proposed level. Automatic notifications state the level change and its reason.
+Notifications include one static camera frame, but deliberately omit the live
+camera attachment so expanding one keeps its action buttons available instead
+of opening an embedded camera player.
 
 There is no separate Acknowledge action. A parent's exact-level selection is
 the shared decision, synchronizes state for every phone, and invalidates stale
-episode actions. Tapping the notification itself opens the configured camera.
+episode actions. Tapping the notification itself still opens the configured
+camera.
 
 Notification presentation differs between iOS and Android, and the operating
 system can limit visible actions. See the official Companion app documentation
@@ -319,10 +331,11 @@ manually, and the player supports volume set, play media, and stop or pause.
 ### Crying is visible in history but no suggestion appears
 
 Nursery Soother evaluates a rolling event pattern, not one isolated pulse.
-Check that at least three rising edges or ten cumulative active seconds occur
-inside 30 seconds and that the configured confirmation debounce—ten seconds by
-default—has elapsed. Confirm the integration is not in Standby and its camera,
-speaker, and notification targets are available.
+For the first response, check that at least two rising edges or eight cumulative
+active seconds occur inside 30 seconds and that the configured confirmation
+debounce—eight seconds by default—has elapsed. Later steps accept one fresh
+event or six fresh active seconds after the dwell. Confirm the integration is
+not in Standby and its camera, speaker, and notification targets are available.
 
 ### Automatic operation does not increase again immediately
 

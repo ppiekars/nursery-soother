@@ -72,6 +72,8 @@ CONFIG_DATA = ENTITY_DATA | {
     ],
 }
 ENTITY_COUNT = 12
+CUSTOM_DEBOUNCE_SECONDS = 12
+CUSTOM_LEVEL_UP_SECONDS = 45
 MEDIA_PLAYER_FEATURES = int(
     MediaPlayerEntityFeature.PLAY_MEDIA
     | MediaPlayerEntityFeature.VOLUME_SET
@@ -95,7 +97,7 @@ TIMER_KEYS = (
 )
 
 
-async def test_v4_standby_setup_reload_and_unload(hass: HomeAssistant) -> None:
+async def test_v5_standby_setup_reload_and_unload(hass: HomeAssistant) -> None:
     """A clean entry exposes all twelve entities and remains safely off."""
     entry = MockConfigEntry(
         domain=DOMAIN,
@@ -159,10 +161,10 @@ async def test_v4_standby_setup_reload_and_unload(hass: HomeAssistant) -> None:
     )
 
 
-async def test_only_v4_migration_is_accepted_without_registry_cleanup(
+async def test_v4_default_timing_migration_preserves_registry_and_custom_values(
     hass: HomeAssistant,
 ) -> None:
-    """Development entries are re-created instead of migrated from old models."""
+    """v4 defaults move to v5 while registry entries and custom values survive."""
     current = MockConfigEntry(
         domain=DOMAIN,
         title=NAME,
@@ -182,15 +184,57 @@ async def test_only_v4_migration_is_accepted_without_registry_cleanup(
     assert await async_migrate_entry(hass, current) is True
     assert registry.async_get(legacy.entity_id) is not None
 
-    old = MockConfigEntry(
+    legacy_defaults = MockConfigEntry(
+        domain=DOMAIN,
+        title=NAME,
+        data=CONFIG_DATA,
+        options=DEFAULT_OPTIONS
+        | {
+            CONF_DEBOUNCE_SECONDS: 10,
+            CONF_LEVEL_UP_SECONDS: 30,
+        },
+        version=ENTRY_VERSION - 1,
+    )
+    legacy_defaults.add_to_hass(hass)
+
+    assert await async_migrate_entry(hass, legacy_defaults) is True
+    assert legacy_defaults.version == ENTRY_VERSION
+    assert (
+        legacy_defaults.options[CONF_DEBOUNCE_SECONDS]
+        == DEFAULT_OPTIONS[CONF_DEBOUNCE_SECONDS]
+    )
+    assert (
+        legacy_defaults.options[CONF_LEVEL_UP_SECONDS]
+        == DEFAULT_OPTIONS[CONF_LEVEL_UP_SECONDS]
+    )
+
+    custom_timings = MockConfigEntry(
+        domain=DOMAIN,
+        title=NAME,
+        data=CONFIG_DATA,
+        options=DEFAULT_OPTIONS
+        | {
+            CONF_DEBOUNCE_SECONDS: CUSTOM_DEBOUNCE_SECONDS,
+            CONF_LEVEL_UP_SECONDS: CUSTOM_LEVEL_UP_SECONDS,
+        },
+        version=ENTRY_VERSION - 1,
+    )
+    custom_timings.add_to_hass(hass)
+
+    assert await async_migrate_entry(hass, custom_timings) is True
+    assert custom_timings.version == ENTRY_VERSION
+    assert custom_timings.options[CONF_DEBOUNCE_SECONDS] == CUSTOM_DEBOUNCE_SECONDS
+    assert custom_timings.options[CONF_LEVEL_UP_SECONDS] == CUSTOM_LEVEL_UP_SECONDS
+
+    unsupported = MockConfigEntry(
         domain=DOMAIN,
         title=NAME,
         data=CONFIG_DATA,
         options=DEFAULT_OPTIONS,
-        version=ENTRY_VERSION - 1,
+        version=ENTRY_VERSION - 2,
     )
-    assert await async_migrate_entry(hass, old) is False
-    assert old.version == ENTRY_VERSION - 1
+    assert await async_migrate_entry(hass, unsupported) is False
+    assert unsupported.version == ENTRY_VERSION - 2
 
 
 async def test_active_entry_setup_reload_and_unload(

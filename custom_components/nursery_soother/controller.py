@@ -87,8 +87,10 @@ SERVICE_CALL_TIMEOUT = 10
 FAILED_PLAY_COMPENSATION_SECONDS = 15
 AUTH_SIGNATURE_QUERY_PARAMETER = "authSig"
 LOCAL_MEDIA_URL_PREFIX = "/media/"
-CRY_EVENT_THRESHOLD = 3
-CRY_ACTIVE_SECONDS_THRESHOLD = 10.0
+INITIAL_CRY_EVENT_THRESHOLD = 2
+INITIAL_CRY_ACTIVE_SECONDS_THRESHOLD = 8.0
+ESCALATION_CRY_EVENT_THRESHOLD = 1
+ESCALATION_CRY_ACTIVE_SECONDS_THRESHOLD = 6.0
 
 type ControllerListener = Callable[[], None]
 
@@ -803,9 +805,10 @@ class NurserySootherController:
         ):
             return
         snapshot = self._evidence.snapshot(now)
+        event_threshold, active_seconds_threshold = self._evidence_thresholds()
         evidence_ready = (
-            snapshot.events >= CRY_EVENT_THRESHOLD
-            or snapshot.active_seconds >= CRY_ACTIVE_SECONDS_THRESHOLD
+            snapshot.events >= event_threshold
+            or snapshot.active_seconds >= active_seconds_threshold
         )
         gate_started_at = (
             self._last_level_change_at
@@ -841,7 +844,7 @@ class NurserySootherController:
 
         delay: float | None = gate_remaining if evidence_ready else None
         active_delay = self._evidence.seconds_until_active_threshold(
-            now, CRY_ACTIVE_SECONDS_THRESHOLD
+            now, active_seconds_threshold
         )
         if active_delay is not None:
             held_delay = max(active_delay, gate_remaining)
@@ -916,12 +919,21 @@ class NurserySootherController:
     def _evaluate_after_stage_reset(self, now: datetime) -> None:
         """Schedule held-sensor evidence after a stage consumes prior evidence."""
         active_delay = self._evidence.seconds_until_active_threshold(
-            now, CRY_ACTIVE_SECONDS_THRESHOLD
+            now, ESCALATION_CRY_ACTIVE_SECONDS_THRESHOLD
         )
         if active_delay is not None:
             self._schedule_evidence(
                 max(active_delay, float(self.settings.level_up_seconds), 0.001)
             )
+
+    def _evidence_thresholds(self) -> tuple[int, float]:
+        """Return conservative initial or responsive fresh-stage thresholds."""
+        if self._episode_confirmed:
+            return (
+                ESCALATION_CRY_EVENT_THRESHOLD,
+                ESCALATION_CRY_ACTIVE_SECONDS_THRESHOLD,
+            )
+        return INITIAL_CRY_EVENT_THRESHOLD, INITIAL_CRY_ACTIVE_SECONDS_THRESHOLD
 
     def _reset_evidence_stage(self, now: datetime) -> None:
         """Require fresh post-response evidence before another recommendation."""
@@ -1197,7 +1209,7 @@ class NurserySootherController:
                 self._level_action(next_level),
                 self._level_action(SoothingLevel.STANDBY),
             ]
-        return await self._async_notify(message, actions, include_camera=True)
+        return await self._async_notify(message, actions)
 
     async def _async_notify_automatic_change(
         self,
@@ -1219,7 +1231,6 @@ class NurserySootherController:
                 self._action(ACTION_SET_MANUAL, "Use manual operation"),
                 self._level_action(SoothingLevel.STANDBY),
             ],
-            include_camera=True,
         )
 
     async def _async_notify_attention(self) -> None:
@@ -1233,7 +1244,6 @@ class NurserySootherController:
             [
                 self._level_action(SoothingLevel.BASELINE),
             ],
-            include_camera=True,
         )
 
     async def _async_notify_dependency_problem(self) -> None:
@@ -1245,7 +1255,6 @@ class NurserySootherController:
                 "action is unavailable. Cry response is paused at a safe level."
             ),
             [self._level_action(SoothingLevel.STANDBY)] if self.enabled else [],
-            include_camera=False,
         )
 
     async def _async_notify_recovery(self) -> None:
@@ -1254,7 +1263,6 @@ class NurserySootherController:
         await self._async_notify(
             f"Nursery devices are available again at {self._level_title(self.level)}.",
             [],
-            include_camera=False,
         )
 
     async def _async_notify_playback_replaced(self) -> None:
@@ -1268,7 +1276,6 @@ class NurserySootherController:
                 "again."
             ),
             [self._level_action(SoothingLevel.BASELINE)],
-            include_camera=False,
         )
 
     def _action(self, command: str, title: str) -> dict[str, str]:
@@ -1297,10 +1304,8 @@ class NurserySootherController:
         self,
         message: str,
         actions: list[dict[str, str]],
-        *,
-        include_camera: bool,
     ) -> bool:
-        """Send one shared tagged notification, continuing past target failures."""
+        """Send an action-first notification, continuing past target failures."""
         if not self.configured:
             return False
         camera = self.camera
@@ -1311,11 +1316,12 @@ class NurserySootherController:
             "group": NOTIFICATION_TAG_PREFIX,
             "url": f"entityId:{camera}",
             "clickAction": f"entityId:{camera}",
+            # A plain image is a single camera frame. Deliberately omit
+            # ``entity_id`` here: on iOS that enables the live camera player
+            # and can displace the actionable-notification controls.
+            "image": f"/api/camera_proxy/{camera}",
             "actions": actions,
         }
-        if include_camera and self._entity_available(camera):
-            notification_data[ATTR_ENTITY_ID] = camera
-            notification_data["image"] = f"/api/camera_proxy/{camera}"
 
         payload = {
             "title": "Nursery Soother",

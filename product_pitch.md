@@ -85,11 +85,13 @@ as a detection event and tracks two signals inside a 30-second rolling window:
 - number of cry events;
 - cumulative sensor-on time.
 
-The initial confirmation rule is three events or ten active seconds, with a
-ten-second confirmation debounce by default. A 60-second gap without a new
-event closes the episode. These defaults are evidence-based starting points,
-not a medical assessment, and should be validated against the actual nursery
-before automatic operation is enabled.
+The initial confirmation rule is two events or eight active seconds, with an
+eight-second confirmation debounce by default. After the first response, one
+fresh event or six fresh active seconds can authorize the next step once the
+20-second dwell has elapsed. A 60-second gap without a new event closes the
+episode. These defaults are evidence-based starting points, not a medical
+assessment, and should be validated against the actual nursery before
+automatic operation is enabled.
 
 The event interpretation matches the official [Home Assistant Reolink
 integration](https://www.home-assistant.io/integrations/reolink/) and its
@@ -122,10 +124,11 @@ there is no separate Acknowledge button.
 Automatic operation authorizes upward changes only. Confirmation can advance
 one level, never skip levels. After every change the controller:
 
-1. begins a 30-second dwell period;
+1. begins a 20-second dwell period;
 2. clears evidence consumed by that change;
 3. accepts only fresh post-change events for the next decision;
-4. advances at most one more level when fresh evidence qualifies.
+4. advances at most one more level after observing one fresh event or six fresh
+   active seconds.
 
 It cannot go beyond Level 4, bypass Maximum volume, reuse old events to race
 through the levels, or act while a dependency or playback-ownership check is

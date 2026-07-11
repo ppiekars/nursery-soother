@@ -30,7 +30,7 @@
           "debounce_seconds": "Initial cry debounce",
           "evidence_window_seconds": "Cry evidence window",
           "cry_gap_seconds": "Cry episode gap",
-          "level_up_seconds": "Level-up interval",
+          "level_up_seconds": "Post-response dwell",
           "settling_seconds": "Quiet settling period",
           "attention_seconds": "Attention deadline"
         }
@@ -84,7 +84,7 @@
           "debounce_seconds": "Initial cry debounce",
           "evidence_window_seconds": "Cry evidence window",
           "cry_gap_seconds": "Cry episode gap",
-          "level_up_seconds": "Level-up interval",
+          "level_up_seconds": "Post-response dwell",
           "settling_seconds": "Quiet settling period",
           "attention_seconds": "Attention deadline"
         }

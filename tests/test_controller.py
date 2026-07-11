@@ -30,24 +30,18 @@ from pytest_homeassistant_custom_component.common import (
 )
 
 from custom_components.nursery_soother.const import (
-    CONF_ATTENTION_SECONDS,
     CONF_AUTOMATIC_OPERATION,
     CONF_BASELINE_VOLUME,
     CONF_CAMERA,
-    CONF_CRY_GAP_SECONDS,
     CONF_CRY_SENSOR,
-    CONF_DEBOUNCE_SECONDS,
-    CONF_EVIDENCE_WINDOW_SECONDS,
     CONF_LEVEL,
     CONF_LEVEL_1_VOLUME,
     CONF_LEVEL_2_VOLUME,
     CONF_LEVEL_3_VOLUME,
     CONF_LEVEL_4_VOLUME,
-    CONF_LEVEL_UP_SECONDS,
     CONF_MAX_VOLUME,
     CONF_MEDIA_PLAYER,
     CONF_NOTIFY_TARGETS,
-    CONF_SETTLING_SECONDS,
     CONF_SOUNDS,
     DEFAULT_OPTIONS,
     DOMAIN,
@@ -106,12 +100,6 @@ FAST_OPTIONS = DEFAULT_OPTIONS | {
     CONF_LEVEL_3_VOLUME: LEVEL_3_PERCENT,
     CONF_LEVEL_4_VOLUME: LEVEL_4_PERCENT,
     CONF_MAX_VOLUME: MAX_PERCENT,
-    CONF_EVIDENCE_WINDOW_SECONDS: 30,
-    CONF_DEBOUNCE_SECONDS: 10,
-    CONF_CRY_GAP_SECONDS: 60,
-    CONF_LEVEL_UP_SECONDS: 30,
-    CONF_SETTLING_SECONDS: 120,
-    CONF_ATTENTION_SECONDS: 150,
 }
 
 SPEAKER_FEATURES = (
@@ -246,9 +234,9 @@ async def _cry_pulse(hass: HomeAssistant) -> None:
     await _set_cry(hass, "off")
 
 
-async def _three_cry_pulses(hass: HomeAssistant) -> None:
-    """Emit the default three-event confirmation threshold."""
-    for _ in range(3):
+async def _initial_cry_pulses(hass: HomeAssistant) -> None:
+    """Emit the default two-event initial confirmation threshold."""
+    for _ in range(2):
         await _cry_pulse(hass)
 
 
@@ -261,10 +249,10 @@ def _action_containing(call: ServiceCall, text: str) -> str:
 async def _enable_automatic_and_confirm(
     hass: HomeAssistant, controller: NurserySootherController
 ) -> None:
-    """Enable automatic response and confirm one three-pulse stage."""
+    """Enable automatic response and confirm one two-pulse initial stage."""
     await controller.async_set_automatic(enabled=True)
-    await _three_cry_pulses(hass)
-    await _advance(hass, 11)
+    await _initial_cry_pulses(hass)
+    await _advance(hass, 9)
 
 
 async def _restart_with_sonos_play_state(
@@ -502,21 +490,21 @@ async def test_failed_active_level_media_change_rolls_back_level(
     await _advance(hass, 16)
 
 
-async def test_manual_three_pulse_evidence_suggests_exact_next_level(
+async def test_manual_two_pulse_evidence_suggests_exact_next_level(
     hass: HomeAssistant,
     started_controller: tuple[NurserySootherController, RecordedCalls],
 ) -> None:
-    """Manual mode explains three events and never changes speaker level."""
+    """Manual mode explains two events and never changes speaker level."""
     controller, calls = started_controller
     volume_count = len(_media_calls(calls, SERVICE_VOLUME_SET))
 
-    await _three_cry_pulses(hass)
+    await _initial_cry_pulses(hass)
 
     assert controller.state is SootherState.CRY_PENDING
     assert controller.recommendation is Recommendation.WAIT
     assert not _incident_notifications(calls)
 
-    await _advance(hass, 11)
+    await _advance(hass, 9)
 
     assert controller.level is SoothingLevel.BASELINE
     assert controller.recommendation is Recommendation.INCREASE_LEVEL
@@ -524,10 +512,12 @@ async def test_manual_three_pulse_evidence_suggests_exact_next_level(
     notifications = _incident_notifications(calls)
     assert len(notifications) == PARENT_COUNT
     for notification in notifications:
-        assert "3" in notification.data["message"]
+        assert "2" in notification.data["message"]
         assert "Level 1" in notification.data["message"]
-        assert notification.data["data"][ATTR_ENTITY_ID] == CAMERA
+        assert ATTR_ENTITY_ID not in notification.data["data"]
         assert notification.data["data"]["image"] == f"/api/camera_proxy/{CAMERA}"
+        assert notification.data["data"]["url"] == f"entityId:{CAMERA}"
+        assert notification.data["data"]["clickAction"] == f"entityId:{CAMERA}"
         titles = {action["title"] for action in notification.data["data"]["actions"]}
         assert any("Level 1" in title for title in titles)
         assert "Acknowledge" not in titles
@@ -539,8 +529,8 @@ async def test_manual_suggestion_action_selects_exact_level_and_clears_all_phone
 ) -> None:
     """One parent's exact selection is the shared decision; no Ack is needed."""
     controller, calls = started_controller
-    await _three_cry_pulses(hass)
-    await _advance(hass, 11)
+    await _initial_cry_pulses(hass)
+    await _advance(hass, 9)
     action = _action_containing(_incident_notifications(calls)[0], "Level 1")
 
     hass.bus.async_fire(EVENT_NOTIFICATION_ACTION, {"action": action})
@@ -559,8 +549,8 @@ async def test_parent_level_selection_invalidates_stale_notification_actions(
 ) -> None:
     """An old phone action cannot override a newer shared level decision."""
     controller, calls = started_controller
-    await _three_cry_pulses(hass)
-    await _advance(hass, 11)
+    await _initial_cry_pulses(hass)
+    await _advance(hass, 9)
     stale_standby = _action_containing(_incident_notifications(calls)[0], "Standby")
 
     await controller.async_set_level(SoothingLevel.LEVEL_1)
@@ -570,7 +560,7 @@ async def test_parent_level_selection_invalidates_stale_notification_actions(
     assert controller.level is SoothingLevel.LEVEL_1
 
 
-async def test_automatic_three_pulse_evidence_raises_exactly_one_level(
+async def test_automatic_two_pulse_evidence_raises_exactly_one_level(
     hass: HomeAssistant,
     started_controller: tuple[NurserySootherController, RecordedCalls],
 ) -> None:
@@ -595,12 +585,12 @@ async def test_automatic_does_not_reuse_evidence_for_another_level(
     hass: HomeAssistant,
     started_controller: tuple[NurserySootherController, RecordedCalls],
 ) -> None:
-    """The three events consumed by Level 1 cannot also authorize Level 2."""
+    """The two initial events consumed by Level 1 cannot authorize Level 2."""
     controller, calls = started_controller
     await _enable_automatic_and_confirm(hass, controller)
     volume_count = len(_media_calls(calls, SERVICE_VOLUME_SET))
 
-    await _advance(hass, 31)
+    await _advance(hass, 21)
 
     assert controller.level is SoothingLevel.LEVEL_1
     assert len(_media_calls(calls, SERVICE_VOLUME_SET)) == volume_count
@@ -610,11 +600,11 @@ async def test_automatic_requires_fresh_evidence_and_level_dwell(
     hass: HomeAssistant,
     started_controller: tuple[NurserySootherController, RecordedCalls],
 ) -> None:
-    """Fresh post-change events wait for the 30-second Level 1 dwell."""
+    """One fresh post-change event waits for the 20-second Level 1 dwell."""
     controller, calls = started_controller
     await _enable_automatic_and_confirm(hass, controller)
-    await _advance(hass, 20)
-    await _three_cry_pulses(hass)
+    await _advance(hass, 10)
+    await _cry_pulse(hass)
     volume_count = len(_media_calls(calls, SERVICE_VOLUME_SET))
 
     assert controller.level is SoothingLevel.LEVEL_1
@@ -631,6 +621,34 @@ async def test_automatic_requires_fresh_evidence_and_level_dwell(
     ] == pytest.approx(LEVEL_2_PERCENT / 100)
 
 
+async def test_held_cry_uses_fresh_active_time_after_each_increase(
+    hass: HomeAssistant,
+    started_controller: tuple[NurserySootherController, RecordedCalls],
+) -> None:
+    """A held sensor needs 8 seconds initially and 6 fresh seconds after reset."""
+    controller, calls = started_controller
+    controller.settings.level_up_seconds = 1
+    await controller.async_set_automatic(enabled=True)
+    await _set_cry(hass, "on")
+
+    await _advance(hass, 7)
+    assert controller.level is SoothingLevel.BASELINE
+
+    await _advance(hass, 2)
+    assert controller.level is SoothingLevel.LEVEL_1
+    volume_count = len(_media_calls(calls, SERVICE_VOLUME_SET))
+
+    await _advance(hass, 5)
+    assert controller.level is SoothingLevel.LEVEL_1
+    assert len(_media_calls(calls, SERVICE_VOLUME_SET)) == volume_count
+
+    await _advance(hass, 2)
+    assert controller.level is SoothingLevel.LEVEL_2
+    assert len(_media_calls(calls, SERVICE_VOLUME_SET)) == volume_count + 1
+
+    await _set_cry(hass, "off")
+
+
 async def test_quiet_interval_decreases_only_one_level(
     hass: HomeAssistant,
     started_controller: tuple[NurserySootherController, RecordedCalls],
@@ -638,11 +656,11 @@ async def test_quiet_interval_decreases_only_one_level(
     """One uninterrupted quiet timer moves Level 3 to Level 2, never Standby."""
     controller, calls = started_controller
     await controller.async_set_level(SoothingLevel.LEVEL_3)
-    await _three_cry_pulses(hass)
-    await _advance(hass, 11)
+    await _initial_cry_pulses(hass)
+    await _advance(hass, 9)
     volume_count = len(_media_calls(calls, SERVICE_VOLUME_SET))
 
-    await _advance(hass, 50)
+    await _advance(hass, 52)
     assert controller.level is SoothingLevel.LEVEL_3
     await _advance(hass, 60)
 
@@ -662,10 +680,10 @@ async def test_quiet_downshift_stops_at_baseline(
     """Quiet policy never turns soothing off without an attention timeout."""
     controller, calls = started_controller
     await controller.async_set_level(SoothingLevel.LEVEL_1)
-    await _three_cry_pulses(hass)
-    await _advance(hass, 11)
+    await _initial_cry_pulses(hass)
+    await _advance(hass, 9)
 
-    await _advance(hass, 50)
+    await _advance(hass, 52)
     await _advance(hass, 60)
     assert controller.level is SoothingLevel.BASELINE
     stop_count = len(_media_calls(calls, SERVICE_MEDIA_STOP))
@@ -682,8 +700,8 @@ async def test_cry_gap_tied_with_attention_deadline_resolves_as_quiet(
 ) -> None:
     """At an exact deadline tie, established quiet wins over attention."""
     controller, calls = started_controller
-    await _three_cry_pulses(hass)
-    await _advance(hass, 11)
+    await _initial_cry_pulses(hass)
+    await _advance(hass, 9)
     stop_count = len(_media_calls(calls, SERVICE_MEDIA_STOP))
 
     await _advance(hass, 40)
@@ -709,7 +727,10 @@ async def test_unresolved_150_second_episode_enters_standby_and_attention(
     stop_count = len(_media_calls(calls, SERVICE_MEDIA_STOP))
 
     await _set_cry(hass, "on")
-    await _advance(hass, 11)
+    await _advance(hass, 7)
+    assert controller.recommendation is Recommendation.WAIT
+
+    await _advance(hass, 2)
     assert controller.recommendation is Recommendation.INCREASE_LEVEL
 
     await _advance(hass, 151)
@@ -729,7 +750,7 @@ async def test_simulated_cry_is_one_point_event_not_a_virtual_state(
     controller, calls = started_controller
 
     await controller.async_simulate_cry_event()
-    await _advance(hass, 11)
+    await _advance(hass, 9)
 
     assert controller.level is SoothingLevel.BASELINE
     assert controller.recommendation is Recommendation.WAIT
@@ -759,16 +780,16 @@ async def test_simulated_cry_in_standby_is_a_no_op(
     assert not any(controller.diagnostics["timers"].values())
 
 
-async def test_three_simulated_point_events_use_normal_manual_evidence_path(
+async def test_two_simulated_point_events_use_normal_manual_evidence_path(
     hass: HomeAssistant,
     started_controller: tuple[NurserySootherController, RecordedCalls],
 ) -> None:
-    """Repeated test presses qualify exactly like three physical rising edges."""
+    """Two test presses qualify exactly like two physical rising edges."""
     controller, calls = started_controller
 
-    for _ in range(3):
+    for _ in range(2):
         await controller.async_simulate_cry_event()
-    await _advance(hass, 11)
+    await _advance(hass, 9)
 
     assert controller.level is SoothingLevel.BASELINE
     assert controller.recommendation is Recommendation.INCREASE_LEVEL
@@ -778,7 +799,7 @@ async def test_three_simulated_point_events_use_normal_manual_evidence_path(
     assert all("Level 1" in call.data["message"] for call in notifications)
 
 
-async def test_three_simulated_events_can_raise_one_automatic_level(
+async def test_two_simulated_events_can_raise_one_automatic_level(
     hass: HomeAssistant,
     started_controller: tuple[NurserySootherController, RecordedCalls],
 ) -> None:
@@ -786,9 +807,9 @@ async def test_three_simulated_events_can_raise_one_automatic_level(
     controller, calls = started_controller
     await controller.async_set_automatic(enabled=True)
 
-    for _ in range(3):
+    for _ in range(2):
         await controller.async_simulate_cry_event()
-    await _advance(hass, 11)
+    await _advance(hass, 9)
 
     assert controller.level is SoothingLevel.LEVEL_1
     assert _media_calls(calls, SERVICE_VOLUME_SET)[-1].data[
@@ -833,14 +854,13 @@ async def test_disabling_automatic_waits_for_fresh_manual_evidence(
     assert len(_incident_notifications(calls)) == notification_count
 
     await _advance(hass, 20)
-    await _three_cry_pulses(hass)
-    await _advance(hass, 11)
+    await _cry_pulse(hass)
 
     new_notifications = _incident_notifications(calls)[notification_count:]
     assert controller.level is SoothingLevel.LEVEL_1
     assert controller.recommendation is Recommendation.INCREASE_LEVEL
     assert len(new_notifications) == PARENT_COUNT
-    assert all("3 cry events" in call.data["message"] for call in new_notifications)
+    assert all("1 cry event" in call.data["message"] for call in new_notifications)
     assert all("Level 2" in call.data["message"] for call in new_notifications)
     assert all("0 cry" not in call.data["message"] for call in new_notifications)
 
@@ -908,7 +928,7 @@ async def test_attribute_updates_do_not_inflate_cry_event_count(
     await hass.async_block_till_done()
     await _set_cry(hass, "off")
 
-    await _advance(hass, 11)
+    await _advance(hass, 9)
 
     assert controller.recommendation is Recommendation.WAIT
     assert not _incident_notifications(calls)
@@ -928,8 +948,8 @@ async def test_notification_failure_does_not_block_other_parent(
         raise HomeAssistantError(error_message)
 
     hass.services.async_register("notify", "parent_one", _fail_notification)
-    await _three_cry_pulses(hass)
-    await _advance(hass, 11)
+    await _initial_cry_pulses(hass)
+    await _advance(hass, 9)
 
     notifications = _incident_notifications(calls)
     assert len(notifications) == 1
@@ -956,8 +976,8 @@ async def test_all_notification_failures_stop_in_standby(
 
     hass.services.async_register("notify", "parent_one", _fail_notification)
     hass.services.async_register("notify", "parent_two", _fail_notification)
-    await _three_cry_pulses(hass)
-    await _advance(hass, 11)
+    await _initial_cry_pulses(hass)
+    await _advance(hass, 9)
 
     assert controller.state is SootherState.ATTENTION_REQUIRED
     assert controller.recommendation is Recommendation.CHECK_DEVICES
@@ -978,8 +998,8 @@ async def test_dependency_loss_blocks_automatic_increase_and_recovers_level(
 
     hass.states.async_set(CAMERA, STATE_UNAVAILABLE)
     await hass.async_block_till_done()
-    await _three_cry_pulses(hass)
-    await _advance(hass, 11)
+    await _initial_cry_pulses(hass)
+    await _advance(hass, 9)
 
     assert controller.state is SootherState.ATTENTION_REQUIRED
     assert controller.recommendation is Recommendation.CHECK_DEVICES
@@ -1001,7 +1021,7 @@ async def test_shutdown_cancels_policy_timers_and_listeners(
 ) -> None:
     """No queued evidence callback can act after config-entry unload."""
     controller, calls = started_controller
-    await _three_cry_pulses(hass)
+    await _initial_cry_pulses(hass)
     assert await controller.async_shutdown()
     media_count = len(calls.media)
 
@@ -1366,7 +1386,7 @@ async def test_queued_automatic_increase_cannot_touch_external_media(
     """Queued policy work relinquishes a takeover without any media effect."""
     controller, calls = started_controller
     await controller.async_set_automatic(enabled=True)
-    await _three_cry_pulses(hass)
+    await _initial_cry_pulses(hass)
     stop_count = len(_media_calls(calls, SERVICE_MEDIA_STOP))
     volume_count = len(_media_calls(calls, SERVICE_VOLUME_SET))
     play_count = len(_media_calls(calls, SERVICE_PLAY_MEDIA))
@@ -1379,7 +1399,7 @@ async def test_queued_automatic_increase_cannot_touch_external_media(
             ATTR_MEDIA_CONTENT_ID: "resolved://parent-music",
         },
     )
-    await _advance(hass, 11)
+    await _advance(hass, 9)
 
     assert controller.level is SoothingLevel.STANDBY
     assert controller.state is SootherState.ATTENTION_REQUIRED

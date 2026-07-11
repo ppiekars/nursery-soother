@@ -263,23 +263,27 @@ For a usable configured binary sensor:
 Evidence is retained only inside the rolling evidence window and only for the
 current episode/generation.
 
-### Confirmation defaults
+### Evidence defaults
 
 The evidence-based initial defaults are:
 
 | Policy value | Default |
 | --- | ---: |
-| Confirmation debounce | 10 seconds by default |
+| Confirmation debounce | 8 seconds by default |
 | Evidence window | 30 seconds |
-| Event-count threshold | 3 rising edges |
-| Active-time threshold | 10 cumulative seconds |
+| Initial event-count threshold | 2 rising edges |
+| Initial active-time threshold | 8 cumulative seconds |
+| Continuing event-count threshold | 1 fresh rising edge |
+| Continuing active-time threshold | 6 fresh cumulative seconds |
 | Cry-event gap | 60 seconds |
 
 The first event starts a candidate and the configured confirmation debounce.
-A candidate may confirm only after that delay—ten seconds with defaults—and
-when the current 30-second window contains either at least three rising edges
-or at least ten cumulative active seconds. The conditions are an OR. Evidence
-falling out of the window cannot qualify later.
+A candidate may confirm only after that delay—eight seconds with defaults—and
+when the current 30-second window contains either at least two rising edges or
+at least eight cumulative active seconds. After the first response, each stage
+uses the same rolling window but needs one fresh rising edge or six fresh active
+seconds. The conditions are an OR. Evidence falling out of the window cannot
+qualify later.
 
 Every new event refreshes the 60-second event-gap timer. If it expires before
 or after confirmation, the cry episode closes and its attention deadline is
@@ -315,9 +319,10 @@ After each automatic increase, the controller:
 
 1. records a new evidence generation boundary at the completed level command;
 2. clears or marks consumed every older event and active-time contribution;
-3. starts the 30-second level-dwell timer;
+3. starts the 20-second level-dwell timer;
 4. accepts only post-boundary evidence toward another increase;
-5. requires both elapsed dwell and a newly satisfied confirmation threshold.
+5. requires both elapsed dwell and a newly satisfied continuing-stage
+   threshold.
 
 This fresh-evidence rule prevents one dense cluster or delayed callback from
 walking through several levels. A manual exact-level selection also establishes
@@ -538,10 +543,11 @@ without raw camera payloads or notification bodies.
 ## Testing strategy
 
 - Evidence tests cover rising-edge normalization, duplicate states, rolling
-  expiry, three-event confirmation, ten-active-second confirmation, the
-  default ten-second debounce boundary, and the 60-second event gap.
+  expiry, two-event and eight-active-second initial confirmation, the default
+  eight-second debounce boundary, one-event or six-active-second continuing
+  stages, and the 60-second event gap.
 - Automatic tests prove each increase is exactly one level, subsequent
-  increases respect 30-second dwell and require fresh evidence, the controller
+  increases respect 20-second dwell and require fresh evidence, the controller
   stops at Level 4, and no increase reuses a prior generation.
 - Manual tests prove confirmation produces an exact suggestion without a level
   or volume change and that the selected exact level is the implicit response.
