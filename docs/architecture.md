@@ -2,7 +2,7 @@
 
 ## Purpose and boundary
 
-Nursery Soother will be a Home Assistant **helper** integration. It will
+Nursery Soother will be a Home Assistant **service** integration. It will
 coordinate entities already owned by Home Assistant integrations; it will not
 implement Reolink, Sonos, mobile-app, HomeKit, or Siri connectivity.
 
