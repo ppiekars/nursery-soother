@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, TypeGuard
 from urllib.parse import parse_qsl, unquote, urlsplit
 
+from homeassistant.components.homeassistant.const import DOMAIN as HOMEASSISTANT_DOMAIN
 from homeassistant.components.media_player import MediaPlayerEnqueue, RepeatMode
 from homeassistant.components.media_player.const import (
     ATTR_GROUP_MEMBERS,
@@ -22,6 +23,7 @@ from homeassistant.components.media_player.const import (
     SERVICE_PLAY_MEDIA,
     MediaPlayerEntityFeature,
     MediaPlayerState,
+    MediaType,
 )
 from homeassistant.components.media_player.const import (
     DOMAIN as MEDIA_PLAYER_DOMAIN,
@@ -106,6 +108,7 @@ SERVICE_CALL_TIMEOUT = 10
 FAILED_PLAY_COMPENSATION_SECONDS = 15
 NATIVE_LOOP_CONFIRMATION_SECONDS = 5.0
 NATIVE_LOOP_CONFIRMATION_POLL_SECONDS = 0.1
+SERVICE_UPDATE_ENTITY = "update_entity"
 AUTH_SIGNATURE_QUERY_PARAMETER = "authSig"
 LOCAL_MEDIA_URL_PREFIX = "/media/"
 INITIAL_CRY_EVENT_THRESHOLD = 2
@@ -353,7 +356,12 @@ class NurserySootherController:
         self._started = True
         watched_entities = [
             entity_id
-            for entity_id in (self.cry_sensor, self.camera, self.media_player)
+            for entity_id in (
+                self.cry_sensor,
+                self.camera,
+                self.media_player,
+                self._sonos_crossfade_entity_id(),
+            )
             if entity_id is not None
         ]
         self._unsubscribers.append(
@@ -938,6 +946,7 @@ class NurserySootherController:
             else SoothingLevel.STANDBY
         )
         self._persist_settings()
+        self._emit_update()
 
     async def _async_state_changed(self, event: Event[EventStateChangedData]) -> None:
         """Handle cry, dependency, and continuous-playback state changes."""
@@ -966,6 +975,8 @@ class NurserySootherController:
                 await self._async_handle_cry_state_changed(event)
             elif entity_id == self.media_player:
                 await self._async_handle_media_state_changed(event)
+            elif entity_id == self._sonos_crossfade_entity_id():
+                await self._async_handle_native_loop_control_changed()
 
     async def _async_handle_cry_state_changed(
         self, event: Event[EventStateChangedData]
@@ -999,6 +1010,9 @@ class NurserySootherController:
         if self._media_was_replaced(event):
             await self._async_finalize_playback_interruption()
             return
+        if self._native_loop_active and not self._native_loop_controls_are_current():
+            await self._async_handle_native_loop_control_changed()
+            return
         current_state = (
             self.hass.states.get(self.media_player)
             if self.media_player is not None
@@ -1021,6 +1035,48 @@ class NurserySootherController:
             await self._async_handle_playback_recovery_failure(
                 "owned playback recovery failed"
             )
+
+    def _native_loop_controls_are_current(self) -> bool:
+        """Return whether the active Sonos loop still has both required modes."""
+        if not self._native_loop_active or self._native_loop_settings is None:
+            return True
+        media_state = (
+            self.hass.states.get(self.media_player)
+            if self.media_player is not None
+            else None
+        )
+        crossfade_state = self.hass.states.get(
+            self._native_loop_settings.crossfade_entity_id
+        )
+        return (
+            media_state is not None
+            and crossfade_state is not None
+            and media_state.attributes.get(ATTR_MEDIA_REPEAT) == RepeatMode.ALL
+            and crossfade_state.state == STATE_ON
+        )
+
+    async def _async_handle_native_loop_control_changed(self) -> None:
+        """Stop a loop that can no longer satisfy its continuity contract."""
+        if not self._native_loop_active or self._native_loop_settings is None:
+            return
+        if (
+            await self._async_refresh_entity(
+                self._native_loop_settings.crossfade_entity_id
+            )
+            and self._native_loop_controls_are_current()
+        ):
+            return
+        self._last_error = "native_loop_controls_changed"
+        await self._async_stop_playback()
+        self.settings.level = SoothingLevel.STANDBY
+        self._persist_settings()
+        self._new_episode()
+        self._transition(
+            SootherState.ATTENTION_REQUIRED,
+            Recommendation.CHECK_DEVICES,
+            "Sonos repeat or crossfade changed during playback",
+        )
+        await self._async_notify_dependency_problem()
 
     async def _async_handle_playback_recovery_failure(self, reason: str) -> None:
         """Expose a failed restart instead of claiming silent soothing."""
@@ -1916,6 +1972,9 @@ class NurserySootherController:
     ) -> bool:
         """Build one Sonos queue item and let repeat-all loop it natively."""
         if self._native_loop_settings is None:
+            if not await self._async_refresh_entity(crossfade_entity_id):
+                self._last_error = "native_crossfade_refresh_failed"
+                return await self._async_start_configured_media(media)
             settings = self._capture_native_loop_settings(crossfade_entity_id)
             if settings is None:
                 return await self._async_start_configured_media(media)
@@ -1939,7 +1998,9 @@ class NurserySootherController:
                 SERVICE_TURN_ON,
                 crossfade_entity_id,
                 {},
-            ) and await self._async_wait_for_entity_state(crossfade_entity_id, STATE_ON)
+            ) and await self._async_refresh_entity(
+                crossfade_entity_id, expected_state=STATE_ON
+            )
             if not crossfade_enabled:
                 self._last_error = "native_crossfade_not_confirmed"
                 if await self._async_native_queue_can_be_replaced():
@@ -2024,36 +2085,81 @@ class NurserySootherController:
         self, entity_id: str, expected_state: str
     ) -> bool:
         """Wait briefly for a subscription-backed entity to confirm a command."""
-        loop = asyncio.get_running_loop()
-        deadline = loop.time() + NATIVE_LOOP_CONFIRMATION_SECONDS
-        while True:
-            state = self.hass.states.get(entity_id)
-            if state is not None and state.state == expected_state:
+        return await self._async_wait_for_state(
+            entity_id,
+            lambda state: state is not None and state.state == expected_state,
+        )
+
+    async def _async_wait_for_state(
+        self,
+        entity_id: str,
+        predicate: Callable[[State | None], bool],
+    ) -> bool:
+        """Wait for one entity predicate without depending on polling cadence."""
+        if predicate(self.hass.states.get(entity_id)):
+            return True
+        changed = asyncio.Event()
+
+        @callback
+        def _state_changed(event: Event[EventStateChangedData]) -> None:
+            if predicate(event.data.get("new_state")):
+                changed.set()
+
+        unsubscribe = async_track_state_change_event(
+            self.hass, [entity_id], _state_changed
+        )
+        try:
+            if predicate(self.hass.states.get(entity_id)):
                 return True
-            remaining = deadline - loop.time()
-            if remaining <= 0:
-                return False
-            await asyncio.sleep(min(NATIVE_LOOP_CONFIRMATION_POLL_SECONDS, remaining))
+            async with asyncio.timeout(NATIVE_LOOP_CONFIRMATION_SECONDS):
+                await changed.wait()
+        except TimeoutError:
+            return False
+        finally:
+            unsubscribe()
+        return True
+
+    async def _async_refresh_entity(
+        self, entity_id: str, *, expected_state: str | None = None
+    ) -> bool:
+        """Force-refresh a cached entity and optionally confirm its new state."""
+        refreshed = await self._async_call_entity(
+            HOMEASSISTANT_DOMAIN,
+            SERVICE_UPDATE_ENTITY,
+            entity_id,
+            {},
+            critical=False,
+        )
+        if not refreshed:
+            return False
+        if expected_state is None:
+            return True
+        return await self._async_wait_for_entity_state(entity_id, expected_state)
 
     async def _async_wait_for_media_repeat(self, expected_repeat: str) -> bool:
         """Wait briefly for Sonos to publish the requested repeat mode."""
-        loop = asyncio.get_running_loop()
-        deadline = loop.time() + NATIVE_LOOP_CONFIRMATION_SECONDS
-        while True:
-            state = (
-                self.hass.states.get(self.media_player)
-                if self.media_player is not None
-                else None
-            )
-            if (
+        return self.media_player is not None and await self._async_wait_for_state(
+            self.media_player,
+            lambda state: (
                 state is not None
                 and state.attributes.get(ATTR_MEDIA_REPEAT) == expected_repeat
-            ):
-                return True
-            remaining = deadline - loop.time()
-            if remaining <= 0:
-                return False
-            await asyncio.sleep(min(NATIVE_LOOP_CONFIRMATION_POLL_SECONDS, remaining))
+            ),
+        )
+
+    async def _async_wait_for_media_inactive(self) -> bool:
+        """Wait for Sonos to confirm that a stop or pause command settled."""
+        return self.media_player is not None and await self._async_wait_for_state(
+            self.media_player,
+            lambda state: (
+                state is not None
+                and state.state
+                in {
+                    MediaPlayerState.IDLE,
+                    MediaPlayerState.OFF,
+                    MediaPlayerState.PAUSED,
+                }
+            ),
+        )
 
     async def _async_wait_for_owned_playback(self) -> bool:
         """Wait for the queued item to become identifiable before changing repeat."""
@@ -2127,7 +2233,11 @@ class NurserySootherController:
             SERVICE_PLAY_MEDIA,
             {
                 ATTR_MEDIA_CONTENT_ID: media[ATTR_MEDIA_CONTENT_ID],
-                ATTR_MEDIA_CONTENT_TYPE: media[ATTR_MEDIA_CONTENT_TYPE],
+                ATTR_MEDIA_CONTENT_TYPE: (
+                    MediaType.MUSIC
+                    if self._selected_media_player_is_sonos()
+                    else media[ATTR_MEDIA_CONTENT_TYPE]
+                ),
                 **(extra_data or {}),
             },
             context=play_context,
@@ -2199,6 +2309,13 @@ class NurserySootherController:
             SONOS_PLATFORM,
             f"{media_entry.unique_id}{SONOS_CROSSFADE_UNIQUE_ID_SUFFIX}",
         )
+
+    def _selected_media_player_is_sonos(self) -> bool:
+        """Return whether the selected player belongs to the Sonos platform."""
+        if self.media_player is None:
+            return False
+        media_entry = er.async_get(self.hass).async_get(self.media_player)
+        return media_entry is not None and media_entry.platform == SONOS_PLATFORM
 
     def _native_crossfade_loop_supported(self, crossfade_entity_id: str) -> bool:
         """Return whether the selected Sonos exposes every proven loop control."""
@@ -2435,7 +2552,7 @@ class NurserySootherController:
         else:
             self._action_generation += 1
 
-    async def _async_stop_playback(  # noqa: C901, PLR0911
+    async def _async_stop_playback(  # noqa: C901, PLR0911, PLR0912
         self, *, preserve_native_loop_session: bool = False
     ) -> bool:
         """Stop only owned playback and clean up its temporary Sonos loop."""
@@ -2488,6 +2605,12 @@ class NurserySootherController:
                 SERVICE_MEDIA_PAUSE, {}, critical=False
             )
         if stopped:
+            if (
+                self._selected_media_player_is_sonos()
+                and not await self._async_wait_for_media_inactive()
+            ):
+                self._last_error = "media_stop_not_confirmed"
+                return False
             self._clear_playback_ownership()
             if native_loop_present:
                 cleaned = await self._async_cleanup_native_loop(
@@ -2532,6 +2655,8 @@ class NurserySootherController:
         self, settings: _NativeLoopSettings, *, force: bool = False
     ) -> bool:
         """Restore settings only while the same Sonos group still has our values."""
+        if not await self._async_refresh_entity(settings.crossfade_entity_id):
+            return False
         media_state = (
             self.hass.states.get(self.media_player)
             if self.media_player is not None
@@ -2564,8 +2689,8 @@ class NurserySootherController:
                 settings.crossfade_entity_id,
                 {},
                 critical=False,
-            ) and await self._async_wait_for_entity_state(
-                settings.crossfade_entity_id, STATE_OFF
+            ) and await self._async_refresh_entity(
+                settings.crossfade_entity_id, expected_state=STATE_OFF
             )
             success = crossfade_restored and success
         return success

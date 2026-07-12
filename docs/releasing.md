@@ -52,9 +52,13 @@ Every release in this product line retains these safety semantics:
 - compatible Sonos players use one queued item with crossfade and repeat-all;
   the queue is not periodically repopulated, while an owned idle state rebuilds
   it with a freshly resolved Local Media URL;
+- Sonos Local Media calls use the `music` media type, refresh cached crossfade
+  state around toggles, and wait for inactive state after stop or pause;
 - Sonos loop setup replaces the existing queue; normal stop restores captured
   repeat and crossfade values, while external takeover leaves the replacement
   playback, queue, repeat, and crossfade untouched;
+- disabling repeat-all or crossfade during an owned loop fails safe to Standby
+  and caregiver attention;
 - other media players retain direct playback and owned-idle recovery without
   queue, repeat, or crossfade changes;
 - off-to-on cry transitions are event samples; one short falling edge is not

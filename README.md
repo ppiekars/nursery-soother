@@ -395,6 +395,9 @@ queue with one copy of the selected track, enables the player's crossfade, and
 sets repeat to **All**. Sonos then loops that single queue item itself. Home
 Assistant does not repopulate the queue at every track boundary, so the loop
 does not depend on a periodic timer or a new play command when the track ends.
+Nursery Soother refreshes Sonos's subscription-backed crossfade entity before
+capturing or confirming it, normalizes Local Media's MIME type to Sonos's
+`music` media type, and waits for stop state before replacing a track.
 
 The Sonos optimization deliberately replaces any queue that existed before the
 soothing session and cannot restore those prior queue items. On a normal
@@ -405,6 +408,10 @@ if the Sonos group changed, it leaves both settings alone. If a parent or
 another source takes over playback, Nursery Soother makes no queue, repeat, or
 crossfade call, because preserving the replacement audio takes priority over
 restoring its snapshot.
+
+If repeat-all or crossfade is disabled during an owned native loop, Nursery
+Soother stops claiming seamless playback, enters Standby, and requests
+caregiver attention.
 
 If an owned Sonos session unexpectedly reports idle, off, or paused, Nursery
 Soother rebuilds the one-item queue. That recovery asks Home Assistant to

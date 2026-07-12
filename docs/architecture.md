@@ -544,6 +544,11 @@ captures the initial repeat mode, crossfade state, and Sonos group membership;
 enables crossfade when needed; clears the queue; enqueues the selected Local
 Media track once with playback; and selects repeat-all. Sonos owns every loop
 boundary after that setup. There is no timer or periodic queue repopulation.
+Because Sonos crossfade state is subscription-backed and can lag the device,
+the controller explicitly refreshes that entity before capture and after each
+toggle. Local Media MIME types are normalized to Sonos's `music` media type at
+the service boundary. A stop or pause must publish an inactive state before a
+track replacement clears ownership and begins new queue setup.
 
 This is a one-item queue, not two duplicate entries. It is also intentionally
 destructive to the previous Sonos queue: starting a soothing session replaces
@@ -568,6 +573,11 @@ resolve a fresh URL.
 The supported target is an overnight session within that URL lifetime. Players
 without the full Sonos capability set use direct `play_media`; they receive the
 same owned-idle recovery but no queue, repeat, or crossfade mutation.
+
+The active loop watches both the media player and its paired crossfade switch.
+If repeat-all or crossfade no longer holds, the controller stops the owned
+loop, enters Standby, and reports attention rather than continuing to advertise
+seamless playback.
 
 If another source replaces the owned sound, the controller relinquishes the
 speaker, moves the visible output level to Standby, cancels response timers,
