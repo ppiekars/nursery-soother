@@ -56,21 +56,24 @@ Every release in this product line retains these safety semantics:
   state around toggles, and wait for inactive state after stop or pause;
 - Sonos loop setup replaces the existing queue; normal stop restores captured
   repeat and crossfade values, while external takeover leaves the replacement
-  playback, queue, repeat, and crossfade untouched;
+  playback, queue, repeat, and crossfade untouched until a caregiver explicitly
+  selects an active level from Standby to authorize a fresh session;
 - disabling repeat-all or crossfade during an owned loop fails safe to Standby
   and caregiver attention;
 - other media players retain direct playback and owned-idle recovery without
   queue, repeat, or crossfade changes;
 - off-to-on cry transitions are event samples; one short falling edge is not
   treated as a settled child;
-- initial confirmation uses two events or eight cumulative active seconds in a
-  30-second window after the configured debounce, which defaults to eight
-  seconds;
+- manual mode sends its exact-level suggestion on the first event, while
+  automatic initial confirmation uses two events or eight cumulative active
+  seconds in a 30-second window after the configured debounce, which defaults
+  to eight seconds;
 - in automatic mode at Baseline, the first event applies Level 1 provisionally;
   confirmation retains it, while a lone unconfirmed event returns to Baseline
   after one dwell without notification or further escalation;
 - a 60-second no-event gap closes the active cry episode;
-- manual mode recommends one exact next level and never changes it;
+- manual mode immediately recommends one exact next level on the first event
+  and never changes it;
 - Automatic operation changes upward only, exactly one level per decision;
 - Level lock prevents provisional increases, automatic increases, and quiet
   downshifts while leaving exact parent selections and Standby available;
@@ -79,9 +82,9 @@ Every release in this product line retains these safety semantics:
   level while manual mode only suggests it;
 - both modes step down one level after each uninterrupted 120-second quiet
   interval and stop downshifting at Baseline;
-- a fixed 150-second deadline from episode confirmation enters Standby and
-  requests caregiver attention if the episode remains active, including while
-  Level lock is on;
+- a fixed 150-second deadline from the first manual alert or automatic
+  confirmation enters Standby and requests caregiver attention if the episode
+  remains active, including while Level lock is on;
 - unavailable dependencies and playback takeover fail safe;
 - restart discards transient evidence, timers, and notification action IDs;
 - no action can exceed Level 4, Maximum volume, or alter media the integration
@@ -113,19 +116,21 @@ The test suite must cover:
 - all six volume entities and monotonic/Maximum validation;
 - rising-edge event counting and duplicate-state suppression;
 - rolling 30-second evidence expiry;
-- two-event and eight-active-second initial confirmation paths;
+- immediate one-event manual notification plus the two-event and
+  eight-active-second automatic initial confirmation paths;
 - immediate provisional Baseline-to-Level-1 response, confirmed retention, and
   unconfirmed rollback after one dwell;
 - one-event and six-active-second continuing-stage paths;
-- the default eight-second confirmation debounce and 60-second event gap;
-- manual exact-level suggestion without any volume action;
+- the default eight-second automatic confirmation debounce and 60-second event
+  gap;
+- immediate manual exact-level suggestion without any volume action;
 - automatic one-level increase, 20-second dwell, fresh-evidence boundary, and
   Level 4 ceiling;
 - Level lock persistence, provisional-response handling, blocked increases,
   deferred quiet downshift, manual override, and attention safety override;
 - one-level quiet downshift every 120 seconds in both modes;
-- attention at 150 seconds from confirmation, including cancellation on event
-  gap and Standby at expiry;
+- attention at 150 seconds from the first manual alert or automatic
+  confirmation, including cancellation on event gap and Standby at expiry;
 - exact media-player and notification payloads;
 - distinct and reused per-level media mappings and exact-level resolution;
 - compatible Sonos one-item queue, repeat-all and crossfade setup, no periodic
@@ -253,15 +258,15 @@ against a sleeping child or an unverified speaker.
 ### Validate pulse evidence in manual mode
 
 1. Select Baseline and leave Automatic operation off.
-2. Produce one short cry pulse. Confirm it is recorded as one event but does
-   not immediately change the level.
-3. Produce two off-to-on pulses inside 30 seconds. With debounce configured
-   to its eight-second default, confirm no earlier decision and then a manual
-   suggestion targeting Level 1.
-4. Repeat using fewer than two pulses whose cumulative on-time reaches eight
-   seconds. Confirm the alternate OR threshold qualifies.
-5. Space events so earlier evidence leaves the 30-second window. Confirm old
-   evidence does not qualify.
+2. Produce one short cry pulse. Confirm it immediately sends a manual
+   suggestion targeting Level 1 but does not change the selected level or
+   speaker volume.
+3. Confirm the notification reports one event and does not wait for the
+   automatic confirmation debounce.
+4. Before the 20-second dwell expires, produce another pulse and confirm it
+   does not create another response decision.
+5. After the dwell, produce one fresh pulse and confirm a later manual
+   suggestion can replace the tagged notification.
 6. Confirm the notification explains aggregate evidence and offers an exact
    next-level response rather than Boost or Acknowledge.
 7. Select the suggested level from one phone. Confirm the exact level applies,
@@ -306,13 +311,14 @@ against a sleeping child or an unverified speaker.
 ### Validate simulation, failures, and recovery
 
 1. Press Simulate cry event after accepting the dashboard confirmation. Confirm
-   one artificial event is added and clearly identified as a test. In automatic
-   mode at Baseline, confirm it immediately starts the same provisional Level 1
-   response and returns after one dwell if left unconfirmed.
-2. Press it twice to qualify the initial count threshold and confirm it uses the
-   same manual or automatic path as physical events. After the first response,
-   verify that one fresh press can qualify the next decision only after the
-   post-response dwell.
+   one artificial event is added and clearly identified as a test. In manual
+   mode, confirm that press immediately sends the exact-level suggestion. In
+   automatic mode at Baseline, confirm it immediately starts the same
+   provisional Level 1 response and returns after one dwell if left
+   unconfirmed.
+2. In automatic mode, press it twice to qualify the initial count threshold.
+   After the first response, verify that one fresh press can qualify the next
+   decision only after the post-response dwell.
 3. Repeat a pending episode while making each selected dependency unavailable
    in turn. Confirm there is no upward level change and remaining surfaces
    report the problem.
@@ -383,7 +389,8 @@ Release notes must highlight:
 - the six exact levels and Automatic operation default off;
 - Level lock default off and its parent-control and safety overrides;
 - five level volumes plus Maximum;
-- the pulse-event confirmation rule and timing defaults;
+- the immediate first-event manual alert and automatic pulse-confirmation
+  timing defaults;
 - gradual quiet downshift and the 150-second Standby/attention cutoff;
 - the independent Local Media selection for every active level;
 - the Sonos one-item crossfade/repeat-all optimization, queue replacement, and

@@ -9,8 +9,8 @@ through **Level 4**. A parent can always select a level directly. An optional
 **Automatic operation** switch gives the first cry event an immediate,
 reversible Baseline-to-Level-1 response, then allows confirmed, continuing cry
 events to move up one level at a time. With automatic operation off, the
-integration explains confirmed evidence and suggests the exact next level
-instead. A separate **Level lock** switch freezes policy-driven increases and
+integration immediately reports the first cry event and suggests the exact
+next level instead. A separate **Level lock** switch freezes policy-driven increases and
 quiet downshifts at the selected level while preserving direct parent control.
 
 > [!IMPORTANT]
@@ -25,11 +25,11 @@ quiet downshifts at the selected level while preserving direct parent control.
 Standby (off)
     ↓ parent selects Baseline or Level 1–4
 Play the sound mapped to that level at its configured, capped volume
-    ↓ first cry event while Automatic is on and Baseline is selected
-Move immediately to Level 1 provisionally; return after one dwell if unconfirmed
-    ↓ repeated cry-event evidence is confirmed
-Automatic off: notify and suggest one exact higher level
-Automatic on: keep provisional Level 1, or move up exactly one level otherwise
+    ↓ first cry event
+Automatic off: notify immediately and suggest one exact higher level
+Automatic on at Baseline: move immediately to Level 1 provisionally
+    ↓ automatic evidence confirms, or fresh manual evidence follows the dwell
+Keep provisional Level 1, or respond one level at a time
     ↓ fresh cry evidence continues after the dwell period
 Repeat one level at a time, never above Level 4 or Maximum volume
     ↓ no new cry event for a full quiet interval
@@ -54,8 +54,11 @@ The following rules are deliberate:
 - Reolink exposes cry detections as brief binary-sensor pulses. Nursery Soother
   counts rising edges and active time inside a rolling evidence window; it does
   not require the sensor to remain continuously on.
-- A cry candidate must satisfy the configured confirmation debounce and then
-  reach either the event-count or cumulative-active-time threshold.
+- In manual mode, the first rising edge immediately sends a caregiver
+  notification and exact next-level suggestion without changing the speaker.
+- In automatic mode, an initial cry candidate must satisfy the configured
+  confirmation debounce and reach either the event-count or
+  cumulative-active-time threshold.
 - With Automatic operation on at Baseline, the first event immediately starts
   a provisional Level 1 response. Confirmation keeps that response; without
   confirmation, it returns to Baseline after the level dwell. No caregiver
@@ -63,7 +66,7 @@ The following rules are deliberate:
 - Automatic operation changes only upward behavior. It increases exactly one
   level, waits for the dwell period, discards evidence used by the prior
   increase, and requires fresh evidence before another increase.
-- With automatic operation off, the same evidence sends a notification with an
+- With automatic operation off, one cry event sends a notification with an
   exact next-level suggestion. It never changes the level by itself.
 - Quiet downshifts are conservative in both modes: each uninterrupted quiet
   interval moves down one level, stopping at Baseline rather than Standby.
@@ -201,14 +204,15 @@ The initial defaults are intentionally low and conservative:
 | Level 3 volume | 25% | Third response level |
 | Level 4 volume | 30% | Highest policy level |
 | Maximum volume | 40% | Hard ceiling for every integration-issued volume command |
-| Confirmation debounce | 8 seconds | Default delay before an initial candidate cry can be confirmed |
-| Initial evidence threshold | 2 events or 8 active seconds | Required evidence for the first response in an episode |
+| Confirmation debounce | 8 seconds | Default delay before an automatic initial candidate can be confirmed |
+| Manual initial threshold | 1 event | Sends the first caregiver suggestion immediately |
+| Automatic initial threshold | 2 events or 8 active seconds | Required evidence to confirm the first automatic response |
 | Continuing evidence threshold | 1 fresh event or 6 fresh active seconds | Required post-response evidence for each later step |
 | Evidence window | 30 seconds | Window used for event count and active time |
 | Cry-event gap | 60 seconds | No-event interval that closes the active cry episode |
 | Level dwell | 20 seconds | Provisional Level 1 grace and minimum time before another response decision |
 | Quiet step-down | 120 seconds | Uninterrupted quiet required for each one-level decrease |
-| Attention timeout | 150 seconds | Fixed deadline from episode confirmation before Standby and caregiver attention |
+| Attention timeout | 150 seconds | Fixed deadline from the first manual alert or automatic confirmation before Standby and caregiver attention |
 
 Volume settings must satisfy:
 
@@ -280,19 +284,20 @@ Explanation keys are `standby`, `soothing`, `gathering_initial_evidence`,
 While an active level is selected, press **Simulate cry event** to inject one
 artificial rising-edge event without changing the physical sensor. Repeated
 presses can exercise the same event-count, evidence-window, manual suggestion,
-and automatic level paths used by real detections. Two presses can qualify the
-initial response; after that response, one fresh press can qualify a later
-decision once the post-response dwell has elapsed. In Standby the test is a
+and automatic level paths used by real detections. One press sends the initial
+manual suggestion immediately; two presses can qualify the initial automatic
+response. After that response, one fresh press can qualify a later decision
+once the post-response dwell has elapsed. In Standby the test is a
 no-op, just as physical events cannot start a session. The example dashboard
 asks for confirmation because an active-session test can send real
 notifications and, when automatic operation is enabled, can affect the speaker.
 
 ## Manual and automatic operation
 
-With **Automatic operation off**, each qualified evidence decision sends one
-shared, tagged notification that explains why crying was inferred—for example,
-the number of detections and active seconds in the evidence window—and
-recommends the exact next level. Only the current notification is visible:
+With **Automatic operation off**, the first cry event immediately sends one
+shared, tagged notification that reports the evidence and recommends the exact
+next level. It does not wait for the confirmation debounce and never changes
+speaker volume. Only the current notification is visible:
 after the dwell period, fresh qualifying evidence in the same episode may
 replace it with a newer suggestion. Choosing the proposed level from the
 notification, dashboard, automation, or Siri calls the same guarded exact-level
@@ -319,8 +324,9 @@ can still enter Standby or lower output as required.
 
 In both modes, each 120-second uninterrupted quiet interval moves down one
 level until Baseline. If the episode remains unresolved for 150 seconds from
-confirmation, the controller enters Standby and requests direct caregiver
-attention. A 60-second no-event gap closes the episode and cancels that
+the first manual alert or automatic confirmation, the controller enters
+Standby and requests direct caregiver attention. A 60-second no-event gap
+closes the episode and cancels that
 attention deadline.
 
 ## Parent notifications
@@ -475,9 +481,11 @@ media item, so verify it on the actual speaker.
 If a parent starts different media, Nursery Soother relinquishes the speaker,
 moves its visible level to Standby, requests attention, and does not alter or
 stop that media. From that visible Standby state, select the desired active
-level directly to authorize a new owned session; no extra Standby selection is
-required. An explicit user replay is treated as parent-owned media even when it
-uses the same raw media ID as the configured sound.
+level directly to authorize replacing the current playback with a new owned
+session; no extra Standby selection is required. On Sonos, that explicit
+selection stops the current playback, captures its repeat and crossfade values,
+and replaces the queue. An explicit user replay is treated as parent-owned
+media even when it uses the same raw media ID as the configured sound.
 
 ## Troubleshooting
 
@@ -489,12 +497,12 @@ manually, and the player supports volume set, play media, and stop or pause.
 
 ### Crying is visible in history but no suggestion appears
 
-Nursery Soother evaluates a rolling event pattern, not one isolated pulse.
-For the first response, check that at least two rising edges or eight cumulative
-active seconds occur inside 30 seconds and that the configured confirmation
-debounce—eight seconds by default—has elapsed. Later steps accept one fresh
-event or six fresh active seconds after the dwell. Confirm the integration is
-not in Standby and its camera, speaker, and notification targets are available.
+In manual mode, one rising edge should notify immediately. In automatic mode,
+check that at least two rising edges or eight cumulative active seconds occur
+inside 30 seconds and that the configured confirmation debounce—eight seconds
+by default—has elapsed. Later steps accept one fresh event or six fresh active
+seconds after the dwell. Confirm the integration is not in Standby and its
+camera, speaker, and notification targets are available.
 In automatic mode at Baseline, one isolated event may still produce a quiet,
 provisional Level 1 response, but it intentionally does not notify unless the
 episode confirms.

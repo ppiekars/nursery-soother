@@ -723,6 +723,20 @@ class NurserySootherController:
                     translation_domain=DOMAIN,
                     translation_key="playback_settling",
                 )
+        if (
+            previous_level is SoothingLevel.STANDBY
+            and not await self._async_prepare_explicit_sonos_takeover()
+        ):
+            self._transition(
+                SootherState.ATTENTION_REQUIRED,
+                Recommendation.CHECK_DEVICES,
+                "parent-authorized speaker takeover failed",
+            )
+            await self._async_notify_dependency_problem()
+            raise HomeAssistantError(
+                translation_domain=DOMAIN,
+                translation_key="level_change_failed",
+            )
         self.settings.level = requested
         now = dt_util.utcnow()
         if not await self._async_apply_level(previous_media):
@@ -976,6 +990,43 @@ class NurserySootherController:
         ):
             return False
         return await self._async_ensure_playback()
+
+    async def _async_prepare_explicit_sonos_takeover(self) -> bool:
+        """Stop active external Sonos audio after an explicit start command."""
+        if (
+            not self._selected_media_player_is_sonos()
+            or not self._media_player_is_active()
+        ):
+            return True
+
+        crossfade_entity_id = self._sonos_crossfade_entity_id()
+        if (
+            crossfade_entity_id is not None
+            and self._native_crossfade_loop_supported(crossfade_entity_id)
+            and await self._async_refresh_entity(crossfade_entity_id)
+        ):
+            self._native_loop_settings = self._capture_native_loop_settings(
+                crossfade_entity_id
+            )
+
+        features = self._media_features()
+        stopped = False
+        if features & MediaPlayerEntityFeature.STOP:
+            stopped = await self._async_call_media(
+                SERVICE_MEDIA_STOP, {}, critical=False
+            )
+        if not stopped and features & MediaPlayerEntityFeature.PAUSE:
+            stopped = await self._async_call_media(
+                SERVICE_MEDIA_PAUSE, {}, critical=False
+            )
+        if not stopped or not await self._async_wait_for_media_inactive():
+            self._native_loop_settings = None
+            self._last_error = "explicit_takeover_stop_not_confirmed"
+            return False
+
+        self._clear_playback_ownership()
+        self._playback_interrupted = False
+        return True
 
     def _restore_level_after_failed_effect(self, previous_level: SoothingLevel) -> None:
         """Publish a level consistent with the output left after a failed effect."""
@@ -1270,11 +1321,12 @@ class NurserySootherController:
             if self._episode_confirmed
             else self._episode_started_at
         )
-        gate_seconds = (
-            self.settings.level_up_seconds
-            if self._episode_confirmed
-            else self.settings.debounce_seconds
-        )
+        if self._episode_confirmed:
+            gate_seconds = self.settings.level_up_seconds
+        elif self.automatic:
+            gate_seconds = self.settings.debounce_seconds
+        else:
+            gate_seconds = 0
         gate_remaining = (
             max(0.0, gate_seconds - (now - gate_started_at).total_seconds())
             if gate_started_at is not None
@@ -1502,11 +1554,16 @@ class NurserySootherController:
             self._schedule_evidence(max(delay, 0.001))
 
     def _evidence_thresholds(self) -> tuple[int, float]:
-        """Return conservative initial or responsive fresh-stage thresholds."""
+        """Return the mode- and stage-specific cry evidence thresholds."""
         if self._episode_confirmed:
             return (
                 ESCALATION_CRY_EVENT_THRESHOLD,
                 ESCALATION_CRY_ACTIVE_SECONDS_THRESHOLD,
+            )
+        if not self.automatic:
+            return (
+                ESCALATION_CRY_EVENT_THRESHOLD,
+                INITIAL_CRY_ACTIVE_SECONDS_THRESHOLD,
             )
         return INITIAL_CRY_EVENT_THRESHOLD, INITIAL_CRY_ACTIVE_SECONDS_THRESHOLD
 
@@ -1611,7 +1668,7 @@ class NurserySootherController:
         if self._episode_started_at is None:
             return None
         return self._episode_started_at + timedelta(
-            seconds=self.settings.debounce_seconds
+            seconds=self.settings.debounce_seconds if self.automatic else 0
         )
 
     def _level_dwell_at(self) -> datetime | None:
@@ -1917,8 +1974,9 @@ class NurserySootherController:
         self._action_generation += 1
         next_level = self.level.next_active()
         prefix = "[Test] Simulated " if simulated_only else ""
+        event_label = "cry event" if snapshot.events == 1 else "cry events"
         evidence = (
-            f"{snapshot.events} cry events and "
+            f"{snapshot.events} {event_label} and "
             f"{snapshot.active_seconds:.1f} detected seconds in "
             f"{self.settings.evidence_window_seconds} seconds"
         )

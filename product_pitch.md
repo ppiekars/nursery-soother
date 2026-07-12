@@ -14,8 +14,8 @@ Standby → Baseline → Level 1 → Level 2 → Level 3 → Level 4
 A parent can select any level exactly. An optional Automatic operation switch
 gives the first event an immediate, reversible Baseline-to-Level-1 response and
 allows confirmed, continuing cry events to move upward one level at a time.
-With automatic operation disabled, Nursery Soother explains why crying was
-inferred and suggests the exact next level without changing it.
+With automatic operation disabled, Nursery Soother reports the first cry event
+immediately and suggests the exact next level without changing it.
 
 ## Product promise
 
@@ -27,7 +27,7 @@ Brief cry detections arrive as repeated events
     ↓
 Aggregate event count and active time in a rolling window
     ↓
-Apply a mild, reversible first response immediately in automatic mode
+Notify immediately in manual mode, or apply a mild provisional automatic response
     ↓
 Confirm a cry episode conservatively
     ↓
@@ -87,15 +87,16 @@ as a detection event and tracks two signals inside a 30-second rolling window:
 - number of cry events;
 - cumulative sensor-on time.
 
-The initial confirmation rule is two events or eight active seconds, with an
-eight-second confirmation debounce by default. In automatic mode at Baseline,
-the first event immediately applies Level 1 provisionally. Confirmation keeps
-it; otherwise the controller returns to Baseline after the 20-second dwell
-without notifying caregivers. After a confirmed response, one fresh event or
-six fresh active seconds can authorize the next step once the dwell has
-elapsed. A 60-second gap without a new event closes the episode. These defaults
-are evidence-based starting points, not a medical assessment, and should be
-validated against the actual nursery before automatic operation is enabled.
+Manual mode reports the first event immediately. Automatic mode retains the
+initial confirmation rule of two events or eight active seconds, with an
+eight-second confirmation debounce by default. At Baseline, the first event
+immediately applies Level 1 provisionally. Confirmation keeps it; otherwise the
+controller returns to Baseline after the 20-second dwell without notifying
+caregivers. After the first response, one fresh event or six fresh active
+seconds can authorize the next step once the dwell has elapsed. A 60-second gap
+without a new event closes the episode. These defaults are evidence-based
+starting points, not a medical assessment, and should be validated against the
+actual nursery before automatic operation is enabled.
 
 The event interpretation matches the official [Home Assistant Reolink
 integration](https://www.home-assistant.io/integrations/reolink/) and its
@@ -106,10 +107,10 @@ implementation](https://github.com/starkillerOG/reolink_aio/blob/main/reolink_ai
 
 ### Manual response
 
-Automatic operation is off by default. For each qualified evidence decision,
-all configured caregivers receive one shared, tagged notification with:
+Automatic operation is off by default. The first cry event immediately sends
+all configured caregivers one shared, tagged notification with:
 
-- the evidence that triggered confirmation;
+- the event evidence observed so far;
 - current soothing level;
 - an exact next-level suggestion;
 - camera access and a safe Standby option when attention is needed.
@@ -142,11 +143,11 @@ through the levels, or act while a dependency or playback-ownership check is
 unsafe.
 
 Both modes step down one level after each uninterrupted 120-second quiet
-interval until Baseline. A confirmed episode also starts one fixed 150-second
-caregiver deadline. If it is still unresolved at expiry, Nursery Soother enters
-Standby, stops its own sound, and requests direct attention regardless of mode
-or level. A 60-second no-event gap closes the episode and cancels that
-attention deadline.
+interval until Baseline. The first manual alert or automatic confirmation also
+starts one fixed 150-second caregiver deadline. If it is still unresolved at
+expiry, Nursery Soother enters Standby, stops its own sound, and requests direct
+attention regardless of mode or level. A 60-second no-event gap closes the
+episode and cancels that attention deadline.
 
 ## What the integration coordinates
 
@@ -248,9 +249,9 @@ The first level-based release includes:
 - generic cry sensor, camera, media-player, media, and notification selection;
 - Standby, Baseline, and four exact response levels;
 - one volume per active level plus a hard Maximum;
-- manual exact-level suggestions and optional automatic upward response;
+- immediate manual exact-level suggestions and optional automatic upward response;
 - immediate provisional Level 1 response from Baseline in automatic mode;
-- pulse-based evidence confirmation;
+- pulse-based automatic evidence confirmation;
 - fresh evidence and dwell before every subsequent automatic increase;
 - gradual quiet step-down and fixed attention cutoff;
 - episode-scoped notifications without Acknowledge;

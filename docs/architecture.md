@@ -357,21 +357,23 @@ The evidence-based initial defaults are:
 
 | Policy value | Default |
 | --- | ---: |
-| Confirmation debounce | 8 seconds by default |
+| Automatic confirmation debounce | 8 seconds by default |
 | Evidence window | 30 seconds |
-| Initial event-count threshold | 2 rising edges |
-| Initial active-time threshold | 8 cumulative seconds |
+| Manual initial event-count threshold | 1 rising edge, immediately |
+| Automatic initial event-count threshold | 2 rising edges |
+| Automatic initial active-time threshold | 8 cumulative seconds |
 | Continuing event-count threshold | 1 fresh rising edge |
 | Continuing active-time threshold | 6 fresh cumulative seconds |
 | Cry-event gap | 60 seconds |
 
-The first event starts a candidate and the configured confirmation debounce.
-A candidate may confirm only after that delay—eight seconds with defaults—and
-when the current 30-second window contains either at least two rising edges or
-at least eight cumulative active seconds. After the first response, each stage
-uses the same rolling window but needs one fresh rising edge or six fresh active
-seconds. The conditions are an OR. Evidence falling out of the window cannot
-qualify later.
+In manual mode, the first rising edge qualifies immediately. In automatic
+mode, the first event starts a candidate and the configured confirmation
+debounce. An automatic candidate may confirm only after that delay—eight
+seconds with defaults—and when the current 30-second window contains either at
+least two rising edges or at least eight cumulative active seconds. After the
+first response, each stage uses the same rolling window but needs one fresh
+rising edge or six fresh active seconds. The conditions are an OR. Evidence
+falling out of the window cannot qualify later.
 
 When Automatic operation is on and the selected level is Baseline, that first
 event also applies Level 1 provisionally. This output change does not mark the
@@ -388,13 +390,14 @@ canceled. The falling edge of one short pulse does not close an episode.
 
 ### Manual response
 
-When Automatic operation is off, confirmation:
+When Automatic operation is off, the first rising edge immediately:
 
 1. leaves the current level unchanged;
 2. computes exactly one next active level when available;
 3. exposes `increase_level` and the exact suggested target;
 4. sends one shared, tagged evidence summary to all configured caregivers;
-5. starts the fixed attention deadline.
+5. starts the fixed attention deadline without waiting for the automatic
+   confirmation debounce.
 
 Each qualified evidence decision creates one current tagged notification. Once
 the stage resets, fresh evidence that qualifies after the dwell period may
@@ -473,10 +476,10 @@ attention safety deadline turns playback off.
 
 ### Fixed attention deadline
 
-Confirmation starts one 150-second attention timer for the episode. It is not
-restarted by a suggestion, manual selection, automatic increase, dwell, or
-quiet downshift. If the event-gap timer closes the episode first, the attention
-timer is canceled.
+The first manual alert or automatic confirmation starts one 150-second
+attention timer for the episode. It is not restarted by a suggestion, manual
+selection, automatic increase, dwell, or quiet downshift. If the event-gap
+timer closes the episode first, the attention timer is canceled.
 
 If the 150-second deadline expires while the episode is still active, the
 controller:
@@ -498,17 +501,18 @@ persistent switch or alternate sensor state.
 
 Each press must:
 
-- use the real evidence window, confirmation delay, mode, notifications,
+- use the real evidence window, mode-specific initial timing, notifications,
   level policy, cap, and attention rules;
 - be distinguishable as simulated in diagnostics and caregiver messages;
 - avoid mutating the physical cry entity;
 - require the same dependency and ownership safety checks;
 - be canceled safely by Standby, unload, or dependency loss.
 
-Repeated presses during an active session intentionally allow testing the
-event-count threshold. In Standby every press is a no-op. The example dashboard
-requires confirmation because active-session simulated events can send real
-notifications and, with Automatic operation enabled, can command the speaker.
+One press tests the immediate manual path; repeated presses intentionally allow
+testing the automatic event-count threshold. In Standby every press is a no-op.
+The example dashboard requires confirmation because active-session simulated
+events can send real notifications and, with Automatic operation enabled, can
+command the speaker.
 
 ## Timer and concurrency rules
 
@@ -579,6 +583,13 @@ forgets its native-loop snapshot and makes no stop, clear-queue, repeat, or
 crossfade request, even though that means the temporary settings may remain.
 The replacement media and its current controls belong to the parent.
 
+An exact active-level selection while the controller visibly reports Standby
+is the deliberate exception to that restraint. It is an explicit caregiver
+command to take over the speaker. For Sonos, the controller captures the live
+repeat, crossfade, and group values, stops or pauses the replacement playback,
+waits for the inactive state, and only then performs the normal guarded queue
+setup. Setup race checks remain in force after that one authorized stop.
+
 Unexpected idle, off, or paused state while playback is still owned triggers a
 fresh setup of the same one-item queue. The Local Media source is resolved
 again by Home Assistant, refreshing a signed media URL rather than depending
@@ -600,7 +611,8 @@ speaker, moves the visible output level to Standby, cancels response timers,
 requests attention, and refuses automatic or live-volume effects. It does not
 stop or alter the parent's replacement media. From that visible Standby state,
 a later explicit active-level selection directly authorizes a fresh owned
-session after validation; no redundant Standby selection is required.
+session after validation, including stopping and replacing active Sonos audio;
+no redundant Standby selection is required.
 
 Playback ownership uses the configured Home Assistant local-media identity,
 not a player's transient raw URL. Home Assistant may resolve
@@ -728,21 +740,24 @@ without raw camera payloads or notification bodies.
 ## Testing strategy
 
 - Evidence tests cover rising-edge normalization, duplicate states, rolling
-  expiry, two-event and eight-active-second initial confirmation, the default
-  eight-second debounce boundary, one-event or six-active-second continuing
+  expiry, the immediate one-event manual threshold, two-event and
+  eight-active-second automatic confirmation, the default eight-second
+  automatic debounce boundary, one-event or six-active-second continuing
   stages, and the 60-second event gap.
 - Automatic tests prove the first event provisionally moves Baseline to Level
   1, confirmation retains it without a second increase, an unconfirmed response
   rolls back after one dwell, subsequent increases respect 20-second dwell and
   require fresh evidence, the controller stops at Level 4, and no increase
   reuses a prior generation.
-- Manual tests prove confirmation produces an exact suggestion without a level
-  or volume change and that the selected exact level is the implicit response.
+- Manual tests prove the first event immediately produces an exact suggestion
+  without a level or volume change and that the selected exact level is the
+  implicit response.
 - Quiet tests prove one downshift per 120-second uninterrupted interval in both
   modes, interruption by a new event, and a floor at Baseline.
-- Attention tests prove the fixed 150-second timer begins at confirmation, is
-  not extended by level changes, is canceled by event-gap expiry, and enters
-  Standby with caregiver attention at expiry.
+- Attention tests prove the fixed 150-second timer begins at the first manual
+  alert or automatic confirmation, is not extended by level changes, is
+  canceled by event-gap expiry, and enters Standby with caregiver attention at
+  expiry.
 - Safety tests cover monotonic configuration, the runtime Maximum cap,
   Standby, dependency loss, playback takeover, failed media actions, Sonos
   one-item repeat-all setup, idle rebuilding, and conservative setting cleanup.
