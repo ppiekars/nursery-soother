@@ -70,7 +70,8 @@ Every release in this product line retains these safety semantics:
   to eight seconds;
 - in automatic mode at Baseline, the first event applies Level 1 provisionally;
   confirmation retains it, while a lone unconfirmed event returns to Baseline
-  after one dwell without notification or further escalation;
+  after the separate 25-second provisional timeout without notification or
+  further escalation;
 - a 60-second no-event gap closes the active cry episode;
 - manual mode immediately recommends one exact next level on the first event
   and never changes it;
@@ -82,9 +83,10 @@ Every release in this product line retains these safety semantics:
   level while manual mode only suggests it;
 - both modes step down one level after each uninterrupted 120-second quiet
   interval and stop downshifting at Baseline;
-- a fixed 150-second deadline from the first manual alert or automatic
+- a 150-second base deadline from the first manual alert or automatic
   confirmation enters Standby and requests caregiver attention if the episode
-  remains active, including while Level lock is on;
+  remains active, including while Level lock is on; one already-pending event
+  gap may receive a bounded, non-renewable grace period;
 - unavailable dependencies and playback takeover fail safe;
 - restart discards transient evidence, timers, and notification action IDs;
 - no action can exceed Level 4, Maximum volume, or alter media the integration
@@ -119,7 +121,7 @@ The test suite must cover:
 - immediate one-event manual notification plus the two-event and
   eight-active-second automatic initial confirmation paths;
 - immediate provisional Baseline-to-Level-1 response, confirmed retention, and
-  unconfirmed rollback after one dwell;
+  unconfirmed rollback after the separate 25-second timeout;
 - one-event and six-active-second continuing-stage paths;
 - the default eight-second automatic confirmation debounce and 60-second event
   gap;
@@ -129,8 +131,8 @@ The test suite must cover:
 - Level lock persistence, provisional-response handling, blocked increases,
   deferred quiet downshift, manual override, and attention safety override;
 - one-level quiet downshift every 120 seconds in both modes;
-- attention at 150 seconds from the first manual alert or automatic
-  confirmation, including cancellation on event gap and Standby at expiry;
+- the 150-second base attention deadline, including cancellation on event gap,
+  one bounded pending-gap grace period, and Standby when still unresolved;
 - exact media-player and notification payloads;
 - distinct and reused per-level media mappings and exact-level resolution;
 - compatible Sonos one-item queue, repeat-all and crossfade setup, no periodic
@@ -304,9 +306,13 @@ against a sleeping child or an unverified speaker.
    extended.
 6. Before that deadline in a separate episode, allow the 60-second event gap to
    expire. Confirm the attention timer is canceled.
-7. Keep another episode active through 150 seconds. Confirm the integration
-   enters Standby, stops owned playback, marks Attention required, and notifies
-   caregivers regardless of the current level or mode.
+7. Stop events shortly before the base deadline so the 60-second event gap
+   would finish just afterward. Confirm attention waits for that pending gap
+   and the episode resolves quietly.
+8. Repeat, but produce a fresh event during the grace period. Confirm the grace
+   is not extended again and the integration enters Standby, stops owned
+   playback, marks Attention required, and notifies caregivers regardless of
+   the current level or mode.
 
 ### Validate simulation, failures, and recovery
 
@@ -314,7 +320,7 @@ against a sleeping child or an unverified speaker.
    one artificial event is added and clearly identified as a test. In manual
    mode, confirm that press immediately sends the exact-level suggestion. In
    automatic mode at Baseline, confirm it immediately starts the same
-   provisional Level 1 response and returns after one dwell if left
+   provisional Level 1 response and returns after 25 seconds if left
    unconfirmed.
 2. In automatic mode, press it twice to qualify the initial count threshold.
    After the first response, verify that one fresh press can qualify the next
@@ -391,7 +397,7 @@ Release notes must highlight:
 - five level volumes plus Maximum;
 - the immediate first-event manual alert and automatic pulse-confirmation
   timing defaults;
-- gradual quiet downshift and the 150-second Standby/attention cutoff;
+- gradual quiet downshift and the bounded 150-second-base attention cutoff;
 - the independent Local Media selection for every active level;
 - the Sonos one-item crossfade/repeat-all optimization, queue replacement, and
   generic-player fallback;

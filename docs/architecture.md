@@ -58,8 +58,8 @@ Standby → Baseline → Level 1 → Level 2 → Level 3 → Level 4
   at Baseline.
 - No command may skip a level automatically, exceed Level 4, exceed Maximum,
   or reuse evidence from a previous automatic increase.
-- One fixed unresolved-episode deadline enters Standby and requests caregiver
-  attention regardless of mode or current level.
+- One bounded unresolved-episode deadline enters Standby and requests
+  caregiver attention regardless of mode or current level.
 - A dependency or speaker-ownership failure fails safe and never authorizes an
   upward change.
 
@@ -243,6 +243,7 @@ Config-entry `options` contains caregiver-adjustable policy values:
 - confirmation debounce;
 - evidence-window duration;
 - cry-event gap;
+- provisional Level 1 timeout;
 - automatic level dwell;
 - quiet step-down interval;
 - attention timeout.
@@ -365,6 +366,8 @@ The evidence-based initial defaults are:
 | Continuing event-count threshold | 1 fresh rising edge |
 | Continuing active-time threshold | 6 fresh cumulative seconds |
 | Cry-event gap | 60 seconds |
+| Provisional Level 1 timeout | 25 seconds |
+| Post-response level dwell | 20 seconds |
 
 In manual mode, the first rising edge qualifies immediately. In automatic
 mode, the first event starts a candidate and the configured confirmation
@@ -381,8 +384,9 @@ episode confirmed, start the attention deadline, send a notification, or make
 the continuing-stage threshold eligible. If initial evidence confirms, the
 controller retains Level 1, consumes the initial evidence, and observes the
 remainder of the dwell from the actual provisional response time. If initial
-evidence does not confirm, Level 1 returns to Baseline after one dwell. The
-rollback delay is never shorter than the confirmation debounce.
+evidence does not confirm, Level 1 returns to Baseline after the separate
+25-second provisional timeout. The rollback delay is never shorter than the
+confirmation debounce.
 
 Every new event refreshes the 60-second event-gap timer. If it expires before
 or after confirmation, the cry episode closes and its attention deadline is
@@ -396,7 +400,7 @@ When Automatic operation is off, the first rising edge immediately:
 2. computes exactly one next active level when available;
 3. exposes `increase_level` and the exact suggested target;
 4. sends one shared, tagged evidence summary to all configured caregivers;
-5. starts the fixed attention deadline without waiting for the automatic
+5. starts the base attention deadline without waiting for the automatic
    confirmation debounce.
 
 Each qualified evidence decision creates one current tagged notification. Once
@@ -463,7 +467,7 @@ unlocking starts a fresh quiet interval before that deferred decrease.
 Exact parent selections and configured physical-button commands remain
 available while locked and become the new held level. The lock does not
 override dependency fail-safe, playback takeover handling, Maximum volume, or
-the fixed attention deadline.
+the bounded attention deadline.
 
 ### Quiet downshift
 
@@ -474,15 +478,21 @@ down exactly one active level. A new cry event cancels the current quiet timer.
 Quiet downshift stops at Baseline. Only an explicit Standby selection or the
 attention safety deadline turns playback off.
 
-### Fixed attention deadline
+### Bounded attention deadline
 
-The first manual alert or automatic confirmation starts one 150-second
+The first manual alert or automatic confirmation starts one 150-second base
 attention timer for the episode. It is not restarted by a suggestion, manual
 selection, automatic increase, dwell, or quiet downshift. If the event-gap
 timer closes the episode first, the attention timer is canceled.
 
-If the 150-second deadline expires while the episode is still active, the
-controller:
+If the base deadline arrives while the physical sensor is off and an event-gap
+timer is already pending, that existing gap receives one bounded grace period
+to finish. The attention callback is ordered just after the gap deadline. A
+fresh event during this grace restarts the event-gap timer but cannot extend
+attention again, preserving a finite safety cutoff.
+
+If the episode remains active after the base deadline and any one-time quiet
+grace, the controller:
 
 1. enters Standby;
 2. stops or pauses only integration-owned playback;
@@ -746,18 +756,18 @@ without raw camera payloads or notification bodies.
   stages, and the 60-second event gap.
 - Automatic tests prove the first event provisionally moves Baseline to Level
   1, confirmation retains it without a second increase, an unconfirmed response
-  rolls back after one dwell, subsequent increases respect 20-second dwell and
-  require fresh evidence, the controller stops at Level 4, and no increase
-  reuses a prior generation.
+  rolls back after the 25-second provisional timeout, subsequent increases
+  respect 20-second dwell and require fresh evidence, the controller stops at
+  Level 4, and no increase reuses a prior generation.
 - Manual tests prove the first event immediately produces an exact suggestion
   without a level or volume change and that the selected exact level is the
   implicit response.
 - Quiet tests prove one downshift per 120-second uninterrupted interval in both
   modes, interruption by a new event, and a floor at Baseline.
-- Attention tests prove the fixed 150-second timer begins at the first manual
-  alert or automatic confirmation, is not extended by level changes, is
-  canceled by event-gap expiry, and enters Standby with caregiver attention at
-  expiry.
+- Attention tests prove the 150-second base timer begins at the first manual
+  alert or automatic confirmation, is not extended by level changes, lets one
+  already-pending event gap resolve first, cannot be extended repeatedly by
+  fresh events, and otherwise enters Standby with caregiver attention.
 - Safety tests cover monotonic configuration, the runtime Maximum cap,
   Standby, dependency loss, playback takeover, failed media actions, Sonos
   one-item repeat-all setup, idle rebuilding, and conservative setting cleanup.

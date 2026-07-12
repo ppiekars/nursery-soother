@@ -53,10 +53,12 @@ from custom_components.nursery_soother.const import (
     CONF_MAX_VOLUME,
     CONF_MEDIA_PLAYER,
     CONF_NOTIFY_TARGETS,
+    CONF_PROVISIONAL_SECONDS,
     CONF_SETTLING_SECONDS,
     CONF_SOUNDS,
     CONF_TOGGLE_TRIGGERS,
     DEFAULT_OPTIONS,
+    DEFAULT_PROVISIONAL_SECONDS,
     DOMAIN,
     ENTRY_VERSION,
     NAME,
@@ -116,6 +118,7 @@ TIMER_KEYS = (
     CONF_DEBOUNCE_SECONDS,
     CONF_EVIDENCE_WINDOW_SECONDS,
     CONF_CRY_GAP_SECONDS,
+    CONF_PROVISIONAL_SECONDS,
     CONF_LEVEL_UP_SECONDS,
     CONF_SETTLING_SECONDS,
     CONF_ATTENTION_SECONDS,
@@ -282,6 +285,25 @@ async def test_v7_has_no_legacy_entry_migration(
     assert await async_migrate_entry(hass, previous) is False
     assert previous.version == PREVIOUS_ENTRY_VERSION
     assert previous.options == DEFAULT_OPTIONS
+
+
+async def test_existing_v7_entry_uses_new_provisional_timeout_default(
+    hass: HomeAssistant,
+) -> None:
+    """A v7 entry created before this option existed remains compatible."""
+    previous_options = dict(DEFAULT_OPTIONS)
+    previous_options.pop(CONF_PROVISIONAL_SECONDS)
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        title=NAME,
+        data=CONFIG_DATA,
+        options=previous_options,
+        version=ENTRY_VERSION,
+    )
+
+    controller = NurserySootherController(hass, entry)
+
+    assert controller.settings.provisional_seconds == DEFAULT_PROVISIONAL_SECONDS
 
 
 async def test_active_entry_setup_reload_and_unload(

@@ -37,7 +37,7 @@ Require fresh evidence before any later increase
     ↓
 Step down gradually after quiet
     ↓
-Stop playback and request direct attention at a fixed safety deadline
+Stop playback and request direct attention at a bounded safety deadline
 ```
 
 It does not attempt to diagnose distress, replace a baby monitor, or automate
@@ -91,10 +91,10 @@ Manual mode reports the first event immediately. Automatic mode retains the
 initial confirmation rule of two events or eight active seconds, with an
 eight-second confirmation debounce by default. At Baseline, the first event
 immediately applies Level 1 provisionally. Confirmation keeps it; otherwise the
-controller returns to Baseline after the 20-second dwell without notifying
-caregivers. After the first response, one fresh event or six fresh active
-seconds can authorize the next step once the dwell has elapsed. A 60-second gap
-without a new event closes the episode. These defaults are evidence-based
+controller returns to Baseline after 25 seconds without notifying caregivers.
+After the first response, one fresh event or six fresh active seconds can
+authorize the next step once the dwell has elapsed. A 60-second gap without a
+new event closes the episode. These defaults are evidence-based
 starting points, not a medical assessment, and should be validated against the
 actual nursery before automatic operation is enabled.
 
@@ -128,7 +128,7 @@ there is no separate Acknowledge button.
 
 Automatic operation authorizes upward changes only. At Baseline, the first
 event applies Level 1 immediately as a provisional response. Confirmation
-keeps Level 1; without confirmation it returns to Baseline after the dwell. At
+keeps Level 1; without confirmation it returns to Baseline after 25 seconds. At
 higher levels, confirmation can advance one level and never skip levels. After
 every confirmed response the controller:
 
@@ -144,10 +144,11 @@ unsafe.
 
 Both modes step down one level after each uninterrupted 120-second quiet
 interval until Baseline. The first manual alert or automatic confirmation also
-starts one fixed 150-second caregiver deadline. If it is still unresolved at
-expiry, Nursery Soother enters Standby, stops its own sound, and requests direct
-attention regardless of mode or level. A 60-second no-event gap closes the
-episode and cancels that attention deadline.
+starts a 150-second caregiver deadline. If a 60-second no-event gap is already
+pending at expiry, it gets one bounded grace period to finish; fresh events do
+not extend it. A completed gap closes the episode and cancels attention.
+Otherwise Nursery Soother enters Standby, stops its own sound, and requests
+direct attention regardless of mode or level.
 
 ## What the integration coordinates
 
@@ -169,7 +170,7 @@ It provides:
 - a caregiver-attention binary sensor;
 - an artificial cry-event button for controlled testing;
 - episode-scoped, synchronized notifications;
-- gradual quiet downshift and a fixed attention cutoff;
+- gradual quiet downshift and a bounded attention cutoff;
 - speaker playback ownership checks and restart-safe recovery;
 - seamless Sonos looping through one queued item, crossfade, and repeat-all,
   with direct-playback fallback for other speakers;
@@ -253,7 +254,7 @@ The first level-based release includes:
 - immediate provisional Level 1 response from Baseline in automatic mode;
 - pulse-based automatic evidence confirmation;
 - fresh evidence and dwell before every subsequent automatic increase;
-- gradual quiet step-down and fixed attention cutoff;
+- gradual quiet step-down and bounded attention cutoff;
 - episode-scoped notifications without Acknowledge;
 - one artificial cry-event button;
 - an optional purpose-built camera and control dashboard card;

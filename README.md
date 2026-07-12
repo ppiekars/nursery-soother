@@ -72,10 +72,12 @@ The following rules are deliberate:
   interval moves down one level, stopping at Baseline rather than Standby.
 - Level lock freezes automatic increases and quiet downshifts. Parents can
   still select any exact level or Standby while it is on. Dependency failures,
-  playback takeover, and the fixed attention cutoff remain safety overrides.
-- An unresolved confirmed episode has one fixed attention deadline. At expiry,
-  the integration enters Standby, stops only its own playback, and asks a
-  caregiver to attend. It never plays indefinitely at a high level.
+  playback takeover, and the bounded attention cutoff remain safety overrides.
+- An unresolved confirmed episode has one base attention deadline. If a
+  no-event gap is already pending when it expires, that gap gets one bounded
+  grace period to resolve first. Fresh events cannot extend the grace. An
+  episode that remains unresolved then enters Standby, stops only its own
+  playback, and asks a caregiver to attend.
 - There are no Boost, Return to baseline, or Acknowledge commands. The level
   selector expresses the parent's decision and implicitly resolves the current
   suggestion.
@@ -210,9 +212,10 @@ The initial defaults are intentionally low and conservative:
 | Continuing evidence threshold | 1 fresh event or 6 fresh active seconds | Required post-response evidence for each later step |
 | Evidence window | 30 seconds | Window used for event count and active time |
 | Cry-event gap | 60 seconds | No-event interval that closes the active cry episode |
-| Level dwell | 20 seconds | Provisional Level 1 grace and minimum time before another response decision |
+| Provisional Level 1 timeout | 25 seconds | Grace for confirming the immediate first-event response |
+| Level dwell | 20 seconds | Minimum time before another response decision |
 | Quiet step-down | 120 seconds | Uninterrupted quiet required for each one-level decrease |
-| Attention timeout | 150 seconds | Fixed deadline from the first manual alert or automatic confirmation before Standby and caregiver attention |
+| Attention timeout | 150 seconds | Base deadline from the first manual alert or automatic confirmation; one pending no-event gap may finish first |
 
 Volume settings must satisfy:
 
@@ -271,7 +274,7 @@ absolute timestamp instead of expecting the integration to update every second.
 Countdown keys may include `confirmation_gate`, `level_dwell`,
 `provisional_rollback`, `cry_gap`, `quiet_step_down`, and `attention_deadline`.
 Several clocks can be active together because, for example, a response dwell,
-the cry-event gap, and the fixed attention deadline have different meanings.
+the cry-event gap, and the base attention deadline have different meanings.
 Expired or cancelled clocks are removed on the corresponding controller update.
 The custom dashboard card does not render these attributes yet.
 
@@ -306,11 +309,12 @@ command. Ignoring the suggestion does not change speaker volume.
 With **Automatic operation on** at Baseline, the first cry event immediately
 starts a provisional Level 1 response. If initial evidence confirms, Level 1
 is retained and the normal continuing-evidence policy begins. If it does not
-confirm within the 20-second level dwell, the controller returns to Baseline
-without notifying caregivers. At higher starting levels, initial confirmation
-still precedes any increase. A later advance requires both the dwell and either
-one fresh post-change event or six fresh active seconds; evidence that justified
-the previous response is never reused. Automatic operation cannot skip a
+confirm within the 25-second provisional timeout, the controller returns to
+Baseline without notifying caregivers. At higher starting levels, initial
+confirmation still precedes any increase. A later advance requires both the
+dwell and either one fresh post-change event or six fresh active seconds;
+evidence that justified the previous response is never reused. Automatic
+operation cannot skip a
 level, exceed Level 4, bypass Maximum, leave Standby, or override a dependency
 or playback-ownership fault. A parent must select an active level before cry
 response monitoring begins.
@@ -318,16 +322,17 @@ response monitoring begins.
 With **Level lock on**, evidence and caregiver notifications continue, but the
 policy cannot increase or quietly decrease the level. A parent may still select
 another exact level or Standby. Unlocking resumes normal policy timing; a quiet
-downshift deferred by the lock receives a fresh quiet interval. The fixed
+downshift deferred by the lock receives a fresh quiet interval. The base
 attention deadline, dependency fail-safe, and playback-ownership protections
 can still enter Standby or lower output as required.
 
 In both modes, each 120-second uninterrupted quiet interval moves down one
-level until Baseline. If the episode remains unresolved for 150 seconds from
-the first manual alert or automatic confirmation, the controller enters
-Standby and requests direct caregiver attention. A 60-second no-event gap
-closes the episode and cancels that
-attention deadline.
+level until Baseline. The first manual alert or automatic confirmation starts
+a 150-second attention deadline. If a 60-second no-event gap is already
+pending when that deadline arrives, it gets one bounded chance to finish; new
+events cannot extend that grace. A completed gap closes the episode and
+cancels attention. Otherwise the controller enters Standby and requests direct
+caregiver attention.
 
 ## Parent notifications
 

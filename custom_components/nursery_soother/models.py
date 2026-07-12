@@ -21,6 +21,7 @@ from .const import (
     CONF_LEVEL_LOCK,
     CONF_LEVEL_UP_SECONDS,
     CONF_MAX_VOLUME,
+    CONF_PROVISIONAL_SECONDS,
     CONF_SETTLING_SECONDS,
     DEFAULT_OPTIONS,
     MAX_VOLUME_PERCENT,
@@ -128,6 +129,7 @@ class SootherSettings:
     debounce_seconds: int
     evidence_window_seconds: int
     cry_gap_seconds: int
+    provisional_seconds: int
     level_up_seconds: int
     settling_seconds: int
     attention_seconds: int
@@ -150,6 +152,7 @@ class SootherSettings:
             debounce_seconds=int(values[CONF_DEBOUNCE_SECONDS]),
             evidence_window_seconds=int(values[CONF_EVIDENCE_WINDOW_SECONDS]),
             cry_gap_seconds=int(values[CONF_CRY_GAP_SECONDS]),
+            provisional_seconds=int(values[CONF_PROVISIONAL_SECONDS]),
             level_up_seconds=int(values[CONF_LEVEL_UP_SECONDS]),
             settling_seconds=int(values[CONF_SETTLING_SECONDS]),
             attention_seconds=int(values[CONF_ATTENTION_SECONDS]),
@@ -170,6 +173,7 @@ class SootherSettings:
             CONF_DEBOUNCE_SECONDS: self.debounce_seconds,
             CONF_EVIDENCE_WINDOW_SECONDS: self.evidence_window_seconds,
             CONF_CRY_GAP_SECONDS: self.cry_gap_seconds,
+            CONF_PROVISIONAL_SECONDS: self.provisional_seconds,
             CONF_LEVEL_UP_SECONDS: self.level_up_seconds,
             CONF_SETTLING_SECONDS: self.settling_seconds,
             CONF_ATTENTION_SECONDS: self.attention_seconds,

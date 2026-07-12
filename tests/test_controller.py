@@ -1566,11 +1566,11 @@ async def test_provisional_and_quiet_countdowns_follow_timer_lifecycle(
     assert provisional["explanation"] == PolicyExplanation.PROVISIONAL_RESPONSE
     assert provisional["countdowns"] == {
         "confirmation_gate": "2026-07-11T12:00:08+00:00",
-        "provisional_rollback": "2026-07-11T12:00:20+00:00",
+        "provisional_rollback": "2026-07-11T12:00:25+00:00",
         "cry_gap": "2026-07-11T12:01:00+00:00",
     }
 
-    await _advance(hass, 21)
+    await _advance(hass, 26)
     rolled_back = controller.status_attributes
     assert "confirmation_gate" not in rolled_back["countdowns"]
     assert "provisional_rollback" not in rolled_back["countdowns"]
@@ -1793,16 +1793,16 @@ async def test_enabling_automatic_after_manual_alert_requires_fresh_evidence(
     assert len(_clear_notifications(calls)) == PARENT_COUNT
 
 
-async def test_unconfirmed_provisional_level_1_returns_to_baseline_after_dwell(
+async def test_unconfirmed_provisional_level_1_returns_after_separate_timeout(
     hass: HomeAssistant,
     started_controller: tuple[NurserySootherController, RecordedCalls],
 ) -> None:
-    """A lone event gets only one bounded 20-second Level 1 response."""
+    """A lone event gets only one bounded 25-second Level 1 response."""
     controller, calls = started_controller
     await controller.async_set_automatic(enabled=True)
     await _cry_pulse(hass)
 
-    await _advance(hass, 19)
+    await _advance(hass, 24)
     assert controller.level is SoothingLevel.LEVEL_1
 
     await _advance(hass, 2)
@@ -1827,7 +1827,7 @@ async def test_provisional_level_1_runs_only_once_per_sparse_cry_episode(
     await controller.async_set_automatic(enabled=True)
     await _cry_pulse(hass)
 
-    await _advance(hass, 21)
+    await _advance(hass, 26)
     assert controller.level is SoothingLevel.BASELINE
     assert controller.diagnostics["initial_level_1_applied"] is True
     volume_count = len(_media_calls(calls, SERVICE_VOLUME_SET))
@@ -2004,6 +2004,72 @@ async def test_cry_gap_tied_with_attention_deadline_resolves_as_quiet(
     assert controller.diagnostics["timers"]["attention"] is False
 
 
+async def test_pending_quiet_gap_gets_bounded_attention_grace(
+    hass: HomeAssistant,
+    started_controller: tuple[NurserySootherController, RecordedCalls],
+) -> None:
+    """A nearly complete quiet gap resolves before parent attention fires."""
+    controller, calls = started_controller
+    await _initial_cry_pulses(hass)
+    await _advance(hass, 9)
+    stop_count = len(_media_calls(calls, SERVICE_MEDIA_STOP))
+
+    await _advance(hass, 40)
+    await controller.async_simulate_cry_event()
+    await _advance(hass, 50)
+    await controller.async_simulate_cry_event()
+    await _advance(hass, 8)
+    await controller.async_simulate_cry_event()
+    await _advance(hass, 52)
+
+    assert controller.state is SootherState.RESPONDING
+    assert not controller.attention_required
+    assert controller.diagnostics["timers"]["attention"] is True
+    countdowns = controller.status_attributes["countdowns"]
+    attention_at = dt_util.parse_datetime(countdowns["attention_deadline"])
+    cry_gap_at = dt_util.parse_datetime(countdowns["cry_gap"])
+    assert attention_at is not None
+    assert cry_gap_at is not None
+    assert timedelta(0) < attention_at - cry_gap_at <= timedelta(seconds=0.01)
+
+    await _advance(hass, 9)
+
+    assert controller.level is SoothingLevel.BASELINE
+    assert controller.state is SootherState.SETTLING
+    assert controller.recommendation is Recommendation.SETTLING
+    assert not controller.attention_required
+    assert controller.diagnostics["timers"]["attention"] is False
+    assert len(_media_calls(calls, SERVICE_MEDIA_STOP)) == stop_count
+
+
+async def test_attention_grace_cannot_be_extended_by_fresh_events(
+    hass: HomeAssistant,
+    started_controller: tuple[NurserySootherController, RecordedCalls],
+) -> None:
+    """Fresh evidence during the one-time quiet grace cannot defer attention."""
+    controller, calls = started_controller
+    await _initial_cry_pulses(hass)
+    await _advance(hass, 9)
+    stop_count = len(_media_calls(calls, SERVICE_MEDIA_STOP))
+
+    await _advance(hass, 40)
+    await controller.async_simulate_cry_event()
+    await _advance(hass, 50)
+    await controller.async_simulate_cry_event()
+    await _advance(hass, 8)
+    await controller.async_simulate_cry_event()
+    await _advance(hass, 52)
+    await _advance(hass, 4)
+    await controller.async_simulate_cry_event()
+    await _advance(hass, 4)
+
+    assert controller.level is SoothingLevel.STANDBY
+    assert controller.state is SootherState.ATTENTION_REQUIRED
+    assert controller.recommendation is Recommendation.ATTEND
+    assert controller.attention_required
+    assert len(_media_calls(calls, SERVICE_MEDIA_STOP)) == stop_count + 1
+
+
 async def test_unresolved_150_second_episode_enters_standby_and_attention(
     hass: HomeAssistant,
     started_controller: tuple[NurserySootherController, RecordedCalls],
@@ -2169,7 +2235,7 @@ async def test_unlock_releases_unconfirmed_provisional_without_double_increase(
     assert controller.level is SoothingLevel.LEVEL_1
 
     await controller.async_set_locked(locked=True)
-    await _advance(hass, 21)
+    await _advance(hass, 26)
 
     assert controller.level is SoothingLevel.LEVEL_1
     assert controller.diagnostics["provisional_level_1"] is False

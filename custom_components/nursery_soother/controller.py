@@ -889,7 +889,7 @@ class NurserySootherController:
                     and self.level is SoothingLevel.LEVEL_1
                 ):
                     response_seconds = max(
-                        float(self.settings.level_up_seconds),
+                        float(self.settings.provisional_seconds),
                         self.settings.debounce_seconds + 0.001,
                     )
                     elapsed = (
@@ -1462,7 +1462,7 @@ class NurserySootherController:
         return True
 
     def _schedule_provisional_rollback(self, delay: float | None = None) -> None:
-        """Return an unconfirmed provisional response to Baseline after dwell."""
+        """Return an unconfirmed provisional response after its timeout."""
         self._cancel_timer("provisional")
         episode = self._episode
         cancel_callback: CALLBACK_TYPE | None = None
@@ -1486,7 +1486,7 @@ class NurserySootherController:
 
         timer_delay = (
             max(
-                float(self.settings.level_up_seconds),
+                float(self.settings.provisional_seconds),
                 self.settings.debounce_seconds + 0.001,
             )
             if delay is None
@@ -1848,8 +1848,13 @@ class NurserySootherController:
             scheduled_at or dt_util.utcnow()
         ) + timedelta(seconds=timer_delay)
 
-    def _schedule_attention(self) -> None:
-        """Stop soothing and alert a parent at the fixed episode deadline."""
+    def _schedule_attention(
+        self,
+        delay: float | None = None,
+        *,
+        allow_quiet_gap_deferral: bool = True,
+    ) -> None:
+        """Stop soothing and alert after the deadline and bounded quiet grace."""
         self._cancel_timer("attention")
         episode = self._episode
         confirmed_at = self._confirmed_at
@@ -1878,6 +1883,25 @@ class NurserySootherController:
                 ):
                     await self._async_finish_cry_gap(now, activity_at)
                     return
+                if (
+                    allow_quiet_gap_deferral
+                    and activity_at is not None
+                    and not self._physical_cry_is_on()
+                    and self._cancel_cry_gap is not None
+                ):
+                    quiet_deadline = self._timer_deadlines.get("cry_gap")
+                    quiet_remaining = (
+                        (quiet_deadline - dt_util.utcnow()).total_seconds()
+                        if quiet_deadline is not None
+                        else 0.0
+                    )
+                    if quiet_remaining > 0:
+                        self._schedule_attention(
+                            quiet_remaining + 0.001,
+                            allow_quiet_gap_deferral=False,
+                        )
+                        self._emit_update()
+                        return
                 stopped = await self._async_stop_playback()
                 if not stopped:
                     self._transition(
@@ -1900,12 +1924,15 @@ class NurserySootherController:
                 )
                 await self._async_notify_attention()
 
-        cancel_callback = async_call_later(
-            self.hass, self.settings.attention_seconds, _expired
+        timer_delay = (
+            float(self.settings.attention_seconds)
+            if delay is None
+            else max(float(delay), 0.001)
         )
+        cancel_callback = async_call_later(self.hass, timer_delay, _expired)
         self._cancel_attention = cancel_callback
         self._timer_deadlines["attention"] = dt_util.utcnow() + timedelta(
-            seconds=self.settings.attention_seconds
+            seconds=timer_delay
         )
 
     async def _async_notification_action(self, event: Event[dict[str, Any]]) -> None:
