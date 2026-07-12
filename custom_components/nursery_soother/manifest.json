@@ -1,7 +1,7 @@
 {
   "domain": "nursery_soother",
   "name": "Nursery Soother",
-  "after_dependencies": ["frontend", "mobile_app"],
+  "after_dependencies": ["frontend", "http", "mobile_app"],
   "codeowners": ["@ppiekars"],
   "config_flow": true,
   "dependencies": ["media_source"],
