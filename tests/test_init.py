@@ -40,7 +40,9 @@ from custom_components.nursery_soother.const import (
     CONF_CRY_GAP_SECONDS,
     CONF_CRY_SENSOR,
     CONF_DEBOUNCE_SECONDS,
+    CONF_DECREASE_LEVEL_TRIGGERS,
     CONF_EVIDENCE_WINDOW_SECONDS,
+    CONF_INCREASE_LEVEL_TRIGGERS,
     CONF_LEVEL,
     CONF_LEVEL_1_VOLUME,
     CONF_LEVEL_2_VOLUME,
@@ -53,6 +55,7 @@ from custom_components.nursery_soother.const import (
     CONF_NOTIFY_TARGETS,
     CONF_SETTLING_SECONDS,
     CONF_SOUNDS,
+    CONF_TOGGLE_TRIGGERS,
     DEFAULT_OPTIONS,
     DOMAIN,
     ENTRY_VERSION,
@@ -88,9 +91,14 @@ CONFIG_DATA = ENTITY_DATA | {
     ],
 }
 ENTITY_COUNT = 13
-CUSTOM_DEBOUNCE_SECONDS = 12
-CUSTOM_LEVEL_UP_SECONDS = 45
-UNSUPPORTED_ENTRY_VERSION = 3
+PREVIOUS_ENTRY_VERSION = 6
+TOGGLE_TRIGGERS = [{"platform": "event", "event_type": "nursery_soother_toggle"}]
+INCREASE_LEVEL_TRIGGERS = [
+    {"platform": "event", "event_type": "nursery_soother_increase_level"}
+]
+DECREASE_LEVEL_TRIGGERS = [
+    {"platform": "event", "event_type": "nursery_soother_decrease_level"}
+]
 MEDIA_PLAYER_FEATURES = int(
     MediaPlayerEntityFeature.PLAY_MEDIA
     | MediaPlayerEntityFeature.VOLUME_SET
@@ -175,12 +183,12 @@ async def test_frontend_registration_failure_keeps_integration_available(
     add_extra_js_url.assert_not_called()
 
 
-async def test_v6_standby_setup_reload_and_unload(hass: HomeAssistant) -> None:
+async def test_v7_standby_setup_reload_and_unload(hass: HomeAssistant) -> None:
     """A clean entry exposes all thirteen entities and remains safely off."""
     entry = MockConfigEntry(
         domain=DOMAIN,
         title=NAME,
-        data=CONFIG_DATA,
+        data=CONFIG_DATA | {CONF_TOGGLE_TRIGGERS: TOGGLE_TRIGGERS},
         options=DEFAULT_OPTIONS,
         version=ENTRY_VERSION,
     )
@@ -239,10 +247,10 @@ async def test_v6_standby_setup_reload_and_unload(hass: HomeAssistant) -> None:
     )
 
 
-async def test_v4_default_timing_migration_preserves_registry_and_custom_values(
+async def test_v7_has_no_legacy_entry_migration(
     hass: HomeAssistant,
 ) -> None:
-    """v4 timings and v5 options migrate to v6 without losing preferences."""
+    """Only current entries pass migration; v6 is deliberately unsupported."""
     current = MockConfigEntry(
         domain=DOMAIN,
         title=NAME,
@@ -262,74 +270,18 @@ async def test_v4_default_timing_migration_preserves_registry_and_custom_values(
     assert await async_migrate_entry(hass, current) is True
     assert registry.async_get(legacy.entity_id) is not None
 
-    legacy_defaults = MockConfigEntry(
-        domain=DOMAIN,
-        title=NAME,
-        data=CONFIG_DATA,
-        options=DEFAULT_OPTIONS
-        | {
-            CONF_DEBOUNCE_SECONDS: 10,
-            CONF_LEVEL_UP_SECONDS: 30,
-        },
-        version=4,
-    )
-    legacy_defaults.add_to_hass(hass)
-
-    assert await async_migrate_entry(hass, legacy_defaults) is True
-    assert legacy_defaults.version == ENTRY_VERSION
-    assert (
-        legacy_defaults.options[CONF_DEBOUNCE_SECONDS]
-        == DEFAULT_OPTIONS[CONF_DEBOUNCE_SECONDS]
-    )
-    assert (
-        legacy_defaults.options[CONF_LEVEL_UP_SECONDS]
-        == DEFAULT_OPTIONS[CONF_LEVEL_UP_SECONDS]
-    )
-    assert legacy_defaults.options[CONF_LEVEL_LOCK] is False
-
-    custom_timings = MockConfigEntry(
-        domain=DOMAIN,
-        title=NAME,
-        data=CONFIG_DATA,
-        options=DEFAULT_OPTIONS
-        | {
-            CONF_DEBOUNCE_SECONDS: CUSTOM_DEBOUNCE_SECONDS,
-            CONF_LEVEL_UP_SECONDS: CUSTOM_LEVEL_UP_SECONDS,
-        },
-        version=4,
-    )
-    custom_timings.add_to_hass(hass)
-
-    assert await async_migrate_entry(hass, custom_timings) is True
-    assert custom_timings.version == ENTRY_VERSION
-    assert custom_timings.options[CONF_DEBOUNCE_SECONDS] == CUSTOM_DEBOUNCE_SECONDS
-    assert custom_timings.options[CONF_LEVEL_UP_SECONDS] == CUSTOM_LEVEL_UP_SECONDS
-
-    v5_options = {
-        key: value for key, value in DEFAULT_OPTIONS.items() if key != CONF_LEVEL_LOCK
-    }
-    v5 = MockConfigEntry(
-        domain=DOMAIN,
-        title=NAME,
-        data=CONFIG_DATA,
-        options=v5_options,
-        version=5,
-    )
-    v5.add_to_hass(hass)
-
-    assert await async_migrate_entry(hass, v5) is True
-    assert v5.version == ENTRY_VERSION
-    assert v5.options == v5_options | {CONF_LEVEL_LOCK: False}
-
-    unsupported = MockConfigEntry(
+    previous = MockConfigEntry(
         domain=DOMAIN,
         title=NAME,
         data=CONFIG_DATA,
         options=DEFAULT_OPTIONS,
-        version=UNSUPPORTED_ENTRY_VERSION,
+        version=PREVIOUS_ENTRY_VERSION,
     )
-    assert await async_migrate_entry(hass, unsupported) is False
-    assert unsupported.version == UNSUPPORTED_ENTRY_VERSION
+    previous.add_to_hass(hass)
+
+    assert await async_migrate_entry(hass, previous) is False
+    assert previous.version == PREVIOUS_ENTRY_VERSION
+    assert previous.options == DEFAULT_OPTIONS
 
 
 async def test_active_entry_setup_reload_and_unload(
@@ -562,6 +514,71 @@ async def test_setup_rejects_incomplete_or_invalid_functional_data(
     with pytest.raises(ConfigEntryError) as error:
         await async_setup_entry(hass, entry)
     assert error.value.translation_key == "invalid_configuration"
+
+
+@pytest.mark.parametrize(
+    "action_trigger_data",
+    [
+        {CONF_TOGGLE_TRIGGERS: []},
+        {CONF_INCREASE_LEVEL_TRIGGERS: "not-a-trigger-list"},
+        {CONF_DECREASE_LEVEL_TRIGGERS: [1]},
+        {CONF_TOGGLE_TRIGGERS: [{}]},
+    ],
+)
+async def test_setup_rejects_invalid_persisted_action_triggers(
+    hass: HomeAssistant,
+    action_trigger_data: dict[str, object],
+) -> None:
+    """Stored action triggers must be non-empty structurally valid lists."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        title=NAME,
+        data=CONFIG_DATA | action_trigger_data,
+        options=DEFAULT_OPTIONS,
+        version=ENTRY_VERSION,
+    )
+
+    with pytest.raises(ConfigEntryError) as error:
+        await async_setup_entry(hass, entry)
+    assert error.value.translation_key == "invalid_action_triggers"
+
+
+async def test_setup_rejects_persisted_action_trigger_reuse(
+    hass: HomeAssistant,
+) -> None:
+    """One stored trigger cannot attach callbacks for two actions."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        title=NAME,
+        data=CONFIG_DATA
+        | {
+            CONF_TOGGLE_TRIGGERS: TOGGLE_TRIGGERS,
+            CONF_DECREASE_LEVEL_TRIGGERS: TOGGLE_TRIGGERS,
+        },
+        options=DEFAULT_OPTIONS,
+        version=ENTRY_VERSION,
+    )
+
+    with pytest.raises(ConfigEntryError) as error:
+        await async_setup_entry(hass, entry)
+    assert error.value.translation_key == "action_trigger_reused"
+
+
+async def test_setup_rejects_duplicate_trigger_in_one_action(
+    hass: HomeAssistant,
+) -> None:
+    """Stored data cannot attach one action callback twice."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        title=NAME,
+        data=CONFIG_DATA | {CONF_TOGGLE_TRIGGERS: TOGGLE_TRIGGERS * 2},
+        options=DEFAULT_OPTIONS,
+        version=ENTRY_VERSION,
+    )
+
+    with pytest.raises(ConfigEntryError) as error:
+        await async_setup_entry(hass, entry)
+    assert error.value.translation_key == "action_trigger_reused"
 
 
 async def test_setup_rejects_persisted_device_overlap(

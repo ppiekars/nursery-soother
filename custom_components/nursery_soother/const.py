@@ -12,7 +12,9 @@ CONF_CAMERA = "camera"
 CONF_CRY_GAP_SECONDS = "cry_gap_seconds"
 CONF_CRY_SENSOR = "cry_sensor"
 CONF_DEBOUNCE_SECONDS = "debounce_seconds"
+CONF_DECREASE_LEVEL_TRIGGERS = "decrease_level_triggers"
 CONF_EVIDENCE_WINDOW_SECONDS = "evidence_window_seconds"
+CONF_INCREASE_LEVEL_TRIGGERS = "increase_level_triggers"
 CONF_LEVEL = "level"
 CONF_LEVEL_LOCK = "level_lock"
 CONF_LEVEL_1_SOUND = "level_1_sound"
@@ -29,6 +31,7 @@ CONF_MEDIA_PLAYER = "media_player"
 CONF_NOTIFY_TARGETS = "notify_targets"
 CONF_SETTLING_SECONDS = "settling_seconds"
 CONF_SOUNDS = "sounds"
+CONF_TOGGLE_TRIGGERS = "toggle_triggers"
 
 DEFAULT_ATTENTION_SECONDS = 150
 DEFAULT_AUTOMATIC_OPERATION = False
@@ -65,7 +68,7 @@ DEFAULT_OPTIONS: Final[dict[str, float | int | bool | str]] = {
 }
 
 DOMAIN = "nursery_soother"
-ENTRY_VERSION = 6
+ENTRY_VERSION = 7
 EVENT_NOTIFICATION_ACTION = "mobile_app_notification_action"
 NAME = "Nursery Soother"
 NOTIFICATION_ACTION_PREFIX = "NURSERY_SOOTHER"

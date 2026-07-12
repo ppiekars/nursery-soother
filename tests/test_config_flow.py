@@ -15,6 +15,7 @@ from homeassistant.const import ATTR_SUPPORTED_FEATURES
 from homeassistant.core import ServiceCall, callback
 from homeassistant.data_entry_flow import FlowResultType, InvalidData
 from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers.selector import TriggerSelector
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.nursery_soother.config_flow import (
@@ -30,7 +31,9 @@ from custom_components.nursery_soother.const import (
     CONF_CRY_GAP_SECONDS,
     CONF_CRY_SENSOR,
     CONF_DEBOUNCE_SECONDS,
+    CONF_DECREASE_LEVEL_TRIGGERS,
     CONF_EVIDENCE_WINDOW_SECONDS,
+    CONF_INCREASE_LEVEL_TRIGGERS,
     CONF_LEVEL,
     CONF_LEVEL_1_SOUND,
     CONF_LEVEL_1_VOLUME,
@@ -47,6 +50,7 @@ from custom_components.nursery_soother.const import (
     CONF_NOTIFY_TARGETS,
     CONF_SETTLING_SECONDS,
     CONF_SOUNDS,
+    CONF_TOGGLE_TRIGGERS,
     DEFAULT_ATTENTION_SECONDS,
     DEFAULT_AUTOMATIC_OPERATION,
     DEFAULT_BASELINE_VOLUME,
@@ -88,6 +92,18 @@ SOUND_SELECTIONS = {
 SOUNDS = {
     level.value: dict(SOUND_SELECTIONS[config_key])
     for level, config_key in LEVEL_SOUND_KEYS.items()
+}
+TOGGLE_TRIGGERS = [{"platform": "event", "event_type": "nursery_soother_toggle"}]
+INCREASE_LEVEL_TRIGGERS = [
+    {"platform": "event", "event_type": "nursery_soother_increase_level"}
+]
+DECREASE_LEVEL_TRIGGERS = [
+    {"platform": "event", "event_type": "nursery_soother_decrease_level"}
+]
+ACTION_TRIGGER_DATA = {
+    CONF_TOGGLE_TRIGGERS: TOGGLE_TRIGGERS,
+    CONF_INCREASE_LEVEL_TRIGGERS: INCREASE_LEVEL_TRIGGERS,
+    CONF_DECREASE_LEVEL_TRIGGERS: DECREASE_LEVEL_TRIGGERS,
 }
 USER_DATA = {
     CONF_CRY_SENSOR: "binary_sensor.nursery_crying",
@@ -197,7 +213,19 @@ async def test_user_flow_creates_standby_manual_entry_with_level_sounds(
     assert NurserySootherConfigFlow.VERSION == ENTRY_VERSION
     form_keys = {key.schema for key in result["data_schema"].schema}
     assert set(SOUND_SELECTIONS) <= form_keys
+    trigger_keys = {
+        CONF_TOGGLE_TRIGGERS,
+        CONF_INCREASE_LEVEL_TRIGGERS,
+        CONF_DECREASE_LEVEL_TRIGGERS,
+    }
+    assert trigger_keys <= form_keys
     assert "soothing_sound" not in form_keys
+    selector_by_key = {
+        key.schema: selector for key, selector in result["data_schema"].schema.items()
+    }
+    assert isinstance(selector_by_key[CONF_TOGGLE_TRIGGERS], TriggerSelector)
+    assert isinstance(selector_by_key[CONF_INCREASE_LEVEL_TRIGGERS], TriggerSelector)
+    assert isinstance(selector_by_key[CONF_DECREASE_LEVEL_TRIGGERS], TriggerSelector)
 
     result = await hass.config_entries.flow.async_configure(
         result["flow_id"], USER_DATA
@@ -215,6 +243,85 @@ async def test_user_flow_creates_standby_manual_entry_with_level_sounds(
     sound_values = list(result["data"][CONF_SOUNDS].values())
     assert sound_values == list(SOUNDS.values())
     assert len({id(sound) for sound in sound_values}) == len(ACTIVE_LEVELS)
+
+
+@pytest.mark.parametrize(
+    ("config_key", "triggers"),
+    [
+        (CONF_TOGGLE_TRIGGERS, TOGGLE_TRIGGERS),
+        (CONF_INCREASE_LEVEL_TRIGGERS, INCREASE_LEVEL_TRIGGERS),
+        (CONF_DECREASE_LEVEL_TRIGGERS, DECREASE_LEVEL_TRIGGERS),
+    ],
+)
+async def test_user_flow_stores_independently_optional_action_triggers(
+    hass: HomeAssistant,
+    config_key: str,
+    triggers: list[dict[str, str]],
+) -> None:
+    """Each action trigger list can be configured without the other two."""
+    result = await _start_behavior_step(hass, USER_DATA | {config_key: triggers})
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], BEHAVIOR_DATA
+    )
+
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert result["data"] == CONFIG_DATA | {config_key: triggers}
+
+
+@pytest.mark.parametrize(
+    "config_key",
+    [
+        CONF_TOGGLE_TRIGGERS,
+        CONF_INCREASE_LEVEL_TRIGGERS,
+        CONF_DECREASE_LEVEL_TRIGGERS,
+    ],
+)
+async def test_user_flow_rejects_an_empty_present_action_trigger_list(
+    hass: HomeAssistant,
+    config_key: str,
+) -> None:
+    """A present action field must select at least one trigger."""
+    result = await _start_user_flow(hass)
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], USER_DATA | {config_key: []}
+    )
+
+    assert result["type"] is FlowResultType.FORM
+    assert result["step_id"] == "user"
+    assert result["errors"] == {config_key: "invalid_action_triggers"}
+
+
+async def test_user_flow_rejects_action_trigger_reuse(
+    hass: HomeAssistant,
+) -> None:
+    """One event cannot invoke multiple controller actions."""
+    result = await _start_user_flow(hass)
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"],
+        USER_DATA
+        | {
+            CONF_TOGGLE_TRIGGERS: TOGGLE_TRIGGERS,
+            CONF_INCREASE_LEVEL_TRIGGERS: TOGGLE_TRIGGERS,
+        },
+    )
+
+    assert result["type"] is FlowResultType.FORM
+    assert result["step_id"] == "user"
+    assert result["errors"] == {"base": "action_trigger_reused"}
+
+
+async def test_user_flow_rejects_duplicate_trigger_in_one_action(
+    hass: HomeAssistant,
+) -> None:
+    """One action cannot attach the same trigger callback twice."""
+    result = await _start_user_flow(hass)
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"],
+        USER_DATA | {CONF_TOGGLE_TRIGGERS: TOGGLE_TRIGGERS * 2},
+    )
+
+    assert result["type"] is FlowResultType.FORM
+    assert result["errors"] == {"base": "action_trigger_reused"}
 
 
 def test_sound_mapping_validation_is_ready_for_distinct_level_media() -> None:
@@ -465,16 +572,20 @@ async def test_reconfigure_round_trips_stored_sound_mapping(
     hass: HomeAssistant,
 ) -> None:
     """Reconfigure presents and updates independent per-level selectors."""
-    entry = _entry(hass)
+    entry = _entry(hass, data=CONFIG_DATA | ACTION_TRIGGER_DATA)
     hass.states.async_set("camera.second_nursery", "idle")
     replacement = {
         "media_content_id": "media-source://media_source/local/level_3-new.mp3",
         "media_content_type": "audio/mpeg",
     }
-    updated_form = USER_DATA | {
-        CONF_CAMERA: "camera.second_nursery",
-        CONF_LEVEL_3_SOUND: replacement,
-    }
+    updated_form = (
+        USER_DATA
+        | ACTION_TRIGGER_DATA
+        | {
+            CONF_CAMERA: "camera.second_nursery",
+            CONF_LEVEL_3_SOUND: replacement,
+        }
+    )
     result = await hass.config_entries.flow.async_init(
         DOMAIN,
         context={"source": SOURCE_RECONFIGURE, "entry_id": entry.entry_id},
@@ -488,6 +599,9 @@ async def test_reconfigure_round_trips_stored_sound_mapping(
     assert {
         config_key: suggested_values[config_key] for config_key in SOUND_SELECTIONS
     } == SOUND_SELECTIONS
+    assert suggested_values[CONF_TOGGLE_TRIGGERS] == TOGGLE_TRIGGERS
+    assert suggested_values[CONF_INCREASE_LEVEL_TRIGGERS] == INCREASE_LEVEL_TRIGGERS
+    assert suggested_values[CONF_DECREASE_LEVEL_TRIGGERS] == DECREASE_LEVEL_TRIGGERS
 
     result = await hass.config_entries.flow.async_configure(
         result["flow_id"], updated_form
@@ -499,7 +613,28 @@ async def test_reconfigure_round_trips_stored_sound_mapping(
         SoothingLevel.LEVEL_3.value: replacement
     }
     assert not set(SOUND_SELECTIONS) & set(entry.data)
+    assert entry.data[CONF_TOGGLE_TRIGGERS] == TOGGLE_TRIGGERS
+    assert entry.data[CONF_INCREASE_LEVEL_TRIGGERS] == INCREASE_LEVEL_TRIGGERS
+    assert entry.data[CONF_DECREASE_LEVEL_TRIGGERS] == DECREASE_LEVEL_TRIGGERS
     assert entry.options == ENTRY_OPTIONS
+
+
+async def test_reconfigure_can_remove_all_optional_action_triggers(
+    hass: HomeAssistant,
+) -> None:
+    """Submitting no optional triggers removes every stored button binding."""
+    entry = _entry(hass, data=CONFIG_DATA | ACTION_TRIGGER_DATA)
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN,
+        context={"source": SOURCE_RECONFIGURE, "entry_id": entry.entry_id},
+    )
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], USER_DATA
+    )
+
+    assert result["type"] is FlowResultType.ABORT
+    assert result["reason"] == "reconfigure_successful"
+    assert not set(ACTION_TRIGGER_DATA) & set(entry.data)
 
 
 async def test_options_preserve_runtime_level_and_automatic_preference(

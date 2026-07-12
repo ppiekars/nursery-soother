@@ -4,7 +4,7 @@
     "step": {
       "user": {
         "title": "Set up Nursery Soother",
-        "description": "Select the nursery devices, local audio for each soothing level, and at least one Home Assistant Companion App notification action.",
+        "description": "Select the nursery devices, local audio for each soothing level, at least one Home Assistant Companion App notification action, and any optional action triggers.",
         "data": {
           "cry_sensor": "Cry-detection sensor",
           "camera": "Camera",
@@ -14,7 +14,10 @@
           "level_2_sound": "Level 2 sound",
           "level_3_sound": "Level 3 sound",
           "level_4_sound": "Level 4 sound",
-          "notify_targets": "Parent notification actions"
+          "notify_targets": "Parent notification actions",
+          "toggle_triggers": "Toggle action triggers",
+          "increase_level_triggers": "Increase-level action triggers",
+          "decrease_level_triggers": "Decrease-level action triggers"
         },
         "data_description": {
           "baseline_sound": "Choose local audio to play at Baseline.",
@@ -22,7 +25,10 @@
           "level_2_sound": "Choose local audio to play at Level 2.",
           "level_3_sound": "Choose local audio to play at Level 3.",
           "level_4_sound": "Choose local audio to play at Level 4.",
-          "notify_targets": "Enter one or more registered actions such as notify.mobile_app_parent_phone."
+          "notify_targets": "Enter one or more registered actions such as notify.mobile_app_parent_phone.",
+          "toggle_triggers": "Optional. Select one or more triggers that turn soothing on or off.",
+          "increase_level_triggers": "Optional. Select one or more triggers that increase the active soothing level.",
+          "decrease_level_triggers": "Optional. Select one or more triggers that decrease the active soothing level."
         }
       },
       "behavior": {
@@ -45,7 +51,7 @@
       },
       "reconfigure": {
         "title": "Reconfigure Nursery Soother",
-        "description": "Update the nursery devices, per-level soothing audio, or parent notification actions.",
+        "description": "Update the nursery devices, per-level soothing audio, parent notification actions, or action triggers.",
         "data": {
           "cry_sensor": "Cry-detection sensor",
           "camera": "Camera",
@@ -55,7 +61,10 @@
           "level_2_sound": "Level 2 sound",
           "level_3_sound": "Level 3 sound",
           "level_4_sound": "Level 4 sound",
-          "notify_targets": "Parent notification actions"
+          "notify_targets": "Parent notification actions",
+          "toggle_triggers": "Toggle action triggers",
+          "increase_level_triggers": "Increase-level action triggers",
+          "decrease_level_triggers": "Decrease-level action triggers"
         },
         "data_description": {
           "baseline_sound": "Choose local audio to play at Baseline.",
@@ -63,7 +72,10 @@
           "level_2_sound": "Choose local audio to play at Level 2.",
           "level_3_sound": "Choose local audio to play at Level 3.",
           "level_4_sound": "Choose local audio to play at Level 4.",
-          "notify_targets": "Enter one or more registered actions such as notify.mobile_app_parent_phone."
+          "notify_targets": "Enter one or more registered actions such as notify.mobile_app_parent_phone.",
+          "toggle_triggers": "Optional. Select one or more triggers that turn soothing on or off.",
+          "increase_level_triggers": "Optional. Select one or more triggers that increase the active soothing level.",
+          "decrease_level_triggers": "Optional. Select one or more triggers that decrease the active soothing level."
         }
       }
     },
@@ -81,6 +93,8 @@
       "invalid_audio_media": "Select an audio item for soothing playback.",
       "invalid_local_audio_media": "Select soothing audio from Home Assistant's My media library.",
       "notify_action_not_found": "One or more notification actions are not registered in Home Assistant.",
+      "invalid_action_triggers": "Select at least one valid trigger for this action or leave the field empty.",
+      "action_trigger_reused": "The same trigger cannot be assigned to more than one action.",
       "invalid_volume_configuration": "Volumes must increase monotonically from Baseline through Level 4 and remain at or below Maximum.",
       "positive_integer_required": "Enter a whole number of seconds greater than zero."
     }
@@ -202,6 +216,12 @@
     },
     "invalid_configuration": {
       "message": "The stored soothing media or parent notification configuration is invalid. Reconfigure Nursery Soother."
+    },
+    "invalid_action_triggers": {
+      "message": "One or more stored action-trigger configurations are invalid. Reconfigure Nursery Soother."
+    },
+    "action_trigger_reused": {
+      "message": "The same stored trigger is assigned to more than one action. Reconfigure Nursery Soother."
     },
     "duplicate_devices": {
       "message": "One or more nursery devices are already assigned to another Nursery Soother entry. Reconfigure this entry with different devices."

@@ -11,9 +11,12 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry
 from custom_components.nursery_soother.const import (
     CONF_CAMERA,
     CONF_CRY_SENSOR,
+    CONF_DECREASE_LEVEL_TRIGGERS,
+    CONF_INCREASE_LEVEL_TRIGGERS,
     CONF_MEDIA_PLAYER,
     CONF_NOTIFY_TARGETS,
     CONF_SOUNDS,
+    CONF_TOGGLE_TRIGGERS,
     DEFAULT_OPTIONS,
     DOMAIN,
     ENTRY_VERSION,
@@ -46,6 +49,15 @@ async def test_diagnostics_redact_every_external_reference(
             "notify.mobile_app_private_parent_one",
             "notify.mobile_app_private_parent_two",
         ],
+        CONF_TOGGLE_TRIGGERS: [
+            {"platform": "event", "event_type": "private_short_press"}
+        ],
+        CONF_INCREASE_LEVEL_TRIGGERS: [
+            {"platform": "event", "event_type": "private_double_press"}
+        ],
+        CONF_DECREASE_LEVEL_TRIGGERS: [
+            {"platform": "event", "event_type": "private_long_press"}
+        ],
     }
     entry = MockConfigEntry(
         domain=DOMAIN,
@@ -67,5 +79,8 @@ async def test_diagnostics_redact_every_external_reference(
         "secret.mp3",
         "private_parent_one",
         "private_parent_two",
+        "private_short_press",
+        "private_double_press",
+        "private_long_press",
     ):
         assert sensitive_value not in serialized

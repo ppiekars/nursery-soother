@@ -26,6 +26,7 @@ from homeassistant.helpers.selector import (
     SelectSelector,
     SelectSelectorConfig,
     SelectSelectorMode,
+    TriggerSelector,
 )
 
 from .const import (
@@ -35,7 +36,9 @@ from .const import (
     CONF_BASELINE_VOLUME,
     CONF_CRY_GAP_SECONDS,
     CONF_DEBOUNCE_SECONDS,
+    CONF_DECREASE_LEVEL_TRIGGERS,
     CONF_EVIDENCE_WINDOW_SECONDS,
+    CONF_INCREASE_LEVEL_TRIGGERS,
     CONF_LEVEL,
     CONF_LEVEL_1_SOUND,
     CONF_LEVEL_1_VOLUME,
@@ -52,6 +55,7 @@ from .const import (
     CONF_NOTIFY_TARGETS,
     CONF_SETTLING_SECONDS,
     CONF_SOUNDS,
+    CONF_TOGGLE_TRIGGERS,
     DEFAULT_AUTOMATIC_OPERATION,
     DEFAULT_LEVEL,
     DEFAULT_LEVEL_LOCK,
@@ -113,6 +117,7 @@ _TIMER_SELECTOR = NumberSelector(
     )
 )
 _AUDIO_MEDIA_SELECTOR = MediaSelector(MediaSelectorConfig(accept=["audio/*"]))
+_TRIGGER_SELECTOR = TriggerSelector()
 
 BEHAVIOR_SCHEMA = vol.Schema(
     {
@@ -177,6 +182,9 @@ def _stable_data_schema(hass: HomeAssistant) -> vol.Schema:
                     mode=SelectSelectorMode.DROPDOWN,
                 )
             ),
+            vol.Optional(CONF_TOGGLE_TRIGGERS): _TRIGGER_SELECTOR,
+            vol.Optional(CONF_INCREASE_LEVEL_TRIGGERS): _TRIGGER_SELECTOR,
+            vol.Optional(CONF_DECREASE_LEVEL_TRIGGERS): _TRIGGER_SELECTOR,
         }
     )
 
@@ -260,6 +268,40 @@ def _normalize_stable_data(
     else:
         normalized_data[CONF_NOTIFY_TARGETS] = normalized_targets
 
+    trigger_data, trigger_errors = _normalize_action_triggers(user_input)
+    normalized_data.update(trigger_data)
+    errors.update(trigger_errors)
+
+    return normalized_data, errors
+
+
+def _normalize_action_triggers(
+    user_input: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, str]]:
+    """Validate and normalize independently optional action triggers."""
+    normalized_data: dict[str, Any] = {}
+    errors: dict[str, str] = {}
+    seen_triggers: list[dict[str, Any]] = []
+    for config_key in (
+        CONF_TOGGLE_TRIGGERS,
+        CONF_INCREASE_LEVEL_TRIGGERS,
+        CONF_DECREASE_LEVEL_TRIGGERS,
+    ):
+        if config_key not in user_input:
+            continue
+        try:
+            normalized_triggers = _TRIGGER_SELECTOR(user_input[config_key])
+        except TypeError, ValueError, vol.Invalid:
+            errors[config_key] = "invalid_action_triggers"
+            continue
+        if not normalized_triggers:
+            errors[config_key] = "invalid_action_triggers"
+            continue
+        for trigger in normalized_triggers:
+            if trigger in seen_triggers:
+                errors["base"] = "action_trigger_reused"
+            seen_triggers.append(trigger)
+        normalized_data[config_key] = normalized_triggers
     return normalized_data, errors
 
 

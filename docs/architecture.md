@@ -13,13 +13,18 @@ One config entry consumes:
 - one `media_player` for soothing playback and volume control;
 - one audio mapping for each active level, selected through the Media browser
   from Home Assistant's Local media source;
-- one or more `notify.mobile_app_*` actions for caregiver communication.
+- one or more `notify.mobile_app_*` actions for caregiver communication;
+- optionally, independently configured standard Home Assistant triggers for a
+  physical button's toggle, one-level increase, and one-level decrease
+  commands.
 
-Standard Home Assistant entity states, supported features, actions, selectors,
-and events remain the integration boundary. Reolink and Sonos are optional,
-not dependencies. A capability-gated Sonos path uses the integration's queue,
-repeat, and crossfade controls, while every other player retains the generic
-media-player path.
+Standard Home Assistant entity states, supported features, actions, trigger
+selectors, and events remain the integration boundary. Reolink, Sonos, Sonoff,
+ZHA, and Zigbee2MQTT are not dependencies. A capability-gated Sonos path uses
+the integration's queue, repeat, and crossfade controls, while every other
+player retains the generic media-player path. Button triggers are consumed in
+the standard form produced by Home Assistant; no button vendor or Zigbee
+backend is coupled to controller policy.
 
 ## Superseding product contract
 
@@ -42,6 +47,12 @@ Standby → Baseline → Level 1 → Level 2 → Level 3 → Level 4
 - Baseline and Levels 1–4 each have one configured volume.
 - Maximum volume is a separate hard ceiling.
 - One switch authorizes automatic **upward** changes only.
+- Three independently optional trigger configurations expose toggle, one-level
+  increase, and one-level decrease commands. A caregiver may map short press,
+  double press, and long press respectively, but gesture names are not part of
+  controller policy.
+- The button commands are direct caregiver commands and remain available while
+  Level lock is on.
 - Manual mode produces an exact next-level suggestion and no volume change.
 - Quiet downshift applies in both modes, one level per quiet interval, stopping
   at Baseline.
@@ -179,8 +190,8 @@ optional module cannot render.
 
 ## Config-entry lifecycle
 
-One config entry represents one nursery. Multiple independent entries are
-supported, but a cry sensor, camera, or speaker cannot be shared between
+One schema-v7 config entry represents one nursery. Multiple independent entries
+are supported, but a cry sensor, camera, or speaker cannot be shared between
 entries.
 
 During setup, the integration:
@@ -188,7 +199,8 @@ During setup, the integration:
 1. validates stored dependencies and safe option relationships;
 2. constructs one controller;
 3. stores it in typed `ConfigEntry.runtime_data`;
-4. registers cry-state and mobile-notification event listeners;
+4. registers cry-state, mobile-notification, and optional button action-trigger
+   listeners;
 5. forwards setup to every implemented entity platform;
 6. remains in Standby or performs safe recovery at the persisted exact level.
 
@@ -201,7 +213,8 @@ attention deadlines.
 Every listener and cancellation callback is owned by the config entry or
 controller and is invoked during unload. Unload cancels future work and stops
 only integration-owned playback. No old event buffer, automatic step, timer,
-or notification action can run after reload or removal.
+notification action, or button-trigger callback can run after reload or
+removal.
 
 ## Configuration ownership
 
@@ -211,7 +224,9 @@ Config-entry `data` contains stable construction dependencies:
 - camera entity ID;
 - media-player entity ID;
 - configured soothing media content ID and type for every active level;
-- configured mobile notification action names.
+- configured mobile notification action names;
+- independently optional generic Home Assistant trigger configurations for
+  physical toggle, increase, and decrease commands.
 
 The configuration flow stores a complete map for Baseline and Levels 1–4.
 Each entry may point to a distinct local-media item, while selecting the same
@@ -244,7 +259,8 @@ Runtime evidence belongs only to the controller:
 - last integration-commanded media identity, level, and volume.
 
 Setup collects required dependencies. Reconfigure replaces them, and Configure
-changes policy values. Code uses
+changes policy values. Reconfigure also adds, replaces, or removes any physical
+button action trigger. Code uses
 `hass.config_entries.async_update_entry`; config-entry data and options are
 never mutated in place.
 
@@ -278,8 +294,9 @@ than issue a command.
 An exact manual level selection is not an increment request. It resolves the
 level's sound and volume, validates dependencies and ownership, completes both
 media-player actions, and only then publishes the selected level. Automatic
-policy is the only caller allowed to derive “next level,” and it derives at
-most one step.
+policy and the explicitly configured physical Increase trigger may derive the
+next level; the physical Decrease trigger may derive the previous level. Each
+derives at most one step.
 
 ## Policy phase versus output level
 
@@ -395,6 +412,27 @@ walking through several levels. A manual exact-level selection also establishes
 a new boundary, so earlier evidence cannot immediately override the parent.
 Level 4 has no automatic successor.
 
+### Physical-button commands
+
+Setup and reconfigure may store three independently optional Home Assistant
+trigger selector values: Toggle, Increase, and Decrease. A useful button
+mapping is short press to Toggle, double press to Increase, and long press to
+Decrease, but the integration stores the selected trigger configurations and
+does not interpret gesture names. ZHA, Zigbee2MQTT, or another integration may
+supply any of the actions without a Sonoff- or vendor-specific path.
+
+The Toggle callback enters Baseline from Standby and enters Standby from any
+active level. The Increase callback advances exactly one active level only
+when the current level is active; it is a no-op in Standby and at Level 4. The
+Decrease callback moves down exactly one active level only when the current
+level is active; it is a no-op in Standby and at Baseline. All callbacks enter
+the same serialized, guarded controller command path used by other direct
+caregiver controls.
+
+These are direct caregiver commands rather than policy decisions. Level lock
+does not block them, but dependency validation, playback ownership, exact
+level media resolution, and the Maximum-volume ceiling still apply.
+
 ### Level lock
 
 Level lock freezes policy-driven output changes at the current exact level.
@@ -403,9 +441,10 @@ deadline, and notify caregivers, but it cannot provisionally or automatically
 increase the level. Quiet expiry is remembered without applying a downshift;
 unlocking starts a fresh quiet interval before that deferred decrease.
 
-Exact parent selections, including Standby, remain available while locked and
-become the new held level. The lock does not override dependency fail-safe,
-playback takeover handling, Maximum volume, or the fixed attention deadline.
+Exact parent selections and configured physical-button commands remain
+available while locked and become the new held level. The lock does not
+override dependency fail-safe, playback takeover handling, Maximum volume, or
+the fixed attention deadline.
 
 ### Quiet downshift
 
@@ -465,6 +504,8 @@ A callback must verify its token, evidence generation, exact level, and current
 state before acting. This ensures:
 
 - duplicate state events do not inflate event count;
+- rapid or duplicate physical-button callbacks cannot race, skip a level, or
+  apply a stale command;
 - an event consumed by one increase cannot authorize another;
 - a canceled dwell or quiet callback cannot change a manually selected level;
 - an old attention callback cannot stop a new session;
@@ -612,8 +653,10 @@ button.nursery_soother_simulate_cry_event
 Entity IDs are user-editable registry data and are never controller identity.
 Consumers use standard `select.select_option`, `switch.turn_on`,
 `switch.turn_off`, `number.set_value`, and `button.press` actions.
+The optional physical-button bindings are config-entry trigger attachments,
+not new entities or a vendor-specific action API.
 
-## Restart and development migration safety
+## Restart and development schema safety
 
 Persistent configuration stores caregiver intent, not transient evidence or
 episode progress. The integration never persists cry-event buffers,
@@ -630,11 +673,11 @@ On restart or reload:
   events;
 - old notification actions cannot be accepted.
 
-Because the integration remains in development, migration from the former
-Boost/Baseline entity model is intentionally not guaranteed. A release that
-changes to the level model must say to remove and re-add the config entry when
-necessary. It must still fail safe: unknown old options cannot start playback,
-infer Automatic operation, or bypass Standby and volume validation.
+Config-entry schema v7 intentionally provides no migration or backward
+compatibility. An existing entry must be removed and added again, then fully
+configured against the v7 schema. Old data must never be interpreted as v7
+button triggers or allowed to start playback, infer Automatic operation, or
+bypass Standby and volume validation.
 
 ## Privacy and diagnostics
 
@@ -679,11 +722,15 @@ without raw camera payloads or notification bodies.
   one-item repeat-all setup, idle rebuilding, and conservative setting cleanup.
 - Simulation tests prove one press contributes one event and uses the same
   policy without mutating the physical sensor.
+- Physical-button tests cover independent optional attachment, toggle at
+  Standby and every active level, one-step increase and decrease, boundary
+  no-ops, Level-lock bypass, rapid callbacks, gesture-agnostic dispatch, and
+  unload cleanup through generic Home Assistant trigger configurations.
 - Notification tests cover evidence summaries, exact-level action IDs,
   cross-phone synchronization, partial delivery, and stale-action rejection.
 - Config-flow tests cover setup, reconfigure, options, single-resource
-  ownership, timing bounds, volume relationships, and safe development schema
-  replacement.
+  ownership, timing bounds, volume relationships, independently optional action
+  triggers, and deliberate v7 remove-and-re-add schema replacement.
 - Entity tests cover stable unique IDs, device linkage, level select options,
   Automatic operation, six numbers, state propagation, and standard actions.
 - Lifecycle tests cover Standby startup, exact-level recovery, unload cleanup,

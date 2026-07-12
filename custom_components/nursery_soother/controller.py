@@ -56,6 +56,10 @@ from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.event import async_call_later, async_track_state_change_event
 from homeassistant.helpers.network import is_hass_url
+from homeassistant.helpers.trigger import (
+    async_initialize_triggers,
+    async_validate_trigger_config,
+)
 from homeassistant.util import dt as dt_util
 
 from .const import (
@@ -64,6 +68,8 @@ from .const import (
     CONF_BASELINE_VOLUME,
     CONF_CAMERA,
     CONF_CRY_SENSOR,
+    CONF_DECREASE_LEVEL_TRIGGERS,
+    CONF_INCREASE_LEVEL_TRIGGERS,
     CONF_LEVEL_1_VOLUME,
     CONF_LEVEL_2_VOLUME,
     CONF_LEVEL_3_VOLUME,
@@ -72,6 +78,7 @@ from .const import (
     CONF_MEDIA_PLAYER,
     CONF_NOTIFY_TARGETS,
     CONF_SOUNDS,
+    CONF_TOGGLE_TRIGGERS,
     DOMAIN,
     EVENT_NOTIFICATION_ACTION,
     MAX_VOLUME_PERCENT,
@@ -159,6 +166,13 @@ class NurserySootherController:
             if isinstance(configured_targets, list)
             else ()
         )
+        self.toggle_triggers = self._trigger_configs(CONF_TOGGLE_TRIGGERS)
+        self.increase_level_triggers = self._trigger_configs(
+            CONF_INCREASE_LEVEL_TRIGGERS
+        )
+        self.decrease_level_triggers = self._trigger_configs(
+            CONF_DECREASE_LEVEL_TRIGGERS
+        )
 
         self.state = SootherState.STANDBY
         self.recommendation = Recommendation.START
@@ -201,6 +215,9 @@ class NurserySootherController:
         self._native_loop_settings: _NativeLoopSettings | None = None
         self._native_loop_active = False
         self._native_loop_force_restore = False
+        self._toggle_triggers_attached = False
+        self._increase_level_triggers_attached = False
+        self._decrease_level_triggers_attached = False
         self._started = False
         self._lock = asyncio.Lock()
 
@@ -288,6 +305,20 @@ class NurserySootherController:
             "playback_owned": self._owns_playback,
             "playback_interrupted": self._playback_interrupted,
             "native_crossfade_loop_active": self._native_loop_active,
+            "physical_control": {
+                "configured": bool(
+                    self.toggle_triggers
+                    or self.increase_level_triggers
+                    or self.decrease_level_triggers
+                ),
+                "toggle_triggers_attached": self._toggle_triggers_attached,
+                "increase_level_triggers_attached": (
+                    self._increase_level_triggers_attached
+                ),
+                "decrease_level_triggers_attached": (
+                    self._decrease_level_triggers_attached
+                ),
+            },
             "timers": {
                 "evidence": self._cancel_evidence is not None,
                 "provisional": self._cancel_provisional is not None,
@@ -339,6 +370,7 @@ class NurserySootherController:
             self._unsubscribers.append(
                 self.hass.bus.async_listen(event_type, self._async_service_changed)
             )
+        await self._async_attach_physical_control_triggers()
         self._dependency_issues = self._find_dependency_issues()
 
         if not self.configured:
@@ -421,6 +453,121 @@ class NurserySootherController:
         self._native_loop_settings = None
         self._native_loop_active = False
         self._native_loop_force_restore = False
+        self._toggle_triggers_attached = False
+        self._increase_level_triggers_attached = False
+        self._decrease_level_triggers_attached = False
+
+    async def _async_attach_physical_control_triggers(self) -> None:
+        """Attach optional generic Home Assistant triggers for physical control."""
+        if self.toggle_triggers:
+            toggle_triggers = await self._async_validate_physical_triggers(
+                self.toggle_triggers, "toggle"
+            )
+            remove_toggle_triggers = await async_initialize_triggers(
+                self.hass,
+                toggle_triggers,
+                self._async_toggle_triggered,
+                DOMAIN,
+                f"{self.entry.title} physical toggle",
+                self._log_physical_trigger_setup,
+            )
+            if remove_toggle_triggers is not None:
+                self._unsubscribers.append(remove_toggle_triggers)
+                self._toggle_triggers_attached = True
+
+        if self.increase_level_triggers:
+            increase_level_triggers = await self._async_validate_physical_triggers(
+                self.increase_level_triggers, "increase"
+            )
+            remove_increase_triggers = await async_initialize_triggers(
+                self.hass,
+                increase_level_triggers,
+                self._async_increase_triggered,
+                DOMAIN,
+                f"{self.entry.title} physical increase",
+                self._log_physical_trigger_setup,
+            )
+            if remove_increase_triggers is not None:
+                self._unsubscribers.append(remove_increase_triggers)
+                self._increase_level_triggers_attached = True
+
+        if self.decrease_level_triggers:
+            decrease_level_triggers = await self._async_validate_physical_triggers(
+                self.decrease_level_triggers, "decrease"
+            )
+            remove_decrease_triggers = await async_initialize_triggers(
+                self.hass,
+                decrease_level_triggers,
+                self._async_decrease_triggered,
+                DOMAIN,
+                f"{self.entry.title} physical decrease",
+                self._log_physical_trigger_setup,
+            )
+            if remove_decrease_triggers is not None:
+                self._unsubscribers.append(remove_decrease_triggers)
+                self._decrease_level_triggers_attached = True
+
+    async def _async_validate_physical_triggers(
+        self, trigger_configs: list[dict[str, Any]], action: str
+    ) -> list[dict[str, Any]]:
+        """Fully validate optional triggers without blocking soothing setup."""
+        try:
+            return await async_validate_trigger_config(self.hass, trigger_configs)
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.warning(
+                "Nursery physical %s trigger setup failed (%s)",
+                action,
+                type(err).__name__,
+            )
+            return []
+
+    async def _async_toggle_triggered(
+        self,
+        run_variables: dict[str, Any],
+        context: Context | None = None,
+    ) -> None:
+        """Apply one configured physical toggle trigger."""
+        del run_variables, context
+        try:
+            await self.async_toggle_from_trigger()
+        except HomeAssistantError as err:
+            _LOGGER.warning(
+                "Nursery physical toggle action failed (%s)", type(err).__name__
+            )
+
+    async def _async_increase_triggered(
+        self,
+        run_variables: dict[str, Any],
+        context: Context | None = None,
+    ) -> None:
+        """Apply one configured physical increase trigger."""
+        del run_variables, context
+        try:
+            await self.async_increase_from_trigger()
+        except HomeAssistantError as err:
+            _LOGGER.warning(
+                "Nursery physical increase action failed (%s)", type(err).__name__
+            )
+
+    async def _async_decrease_triggered(
+        self,
+        run_variables: dict[str, Any],
+        context: Context | None = None,
+    ) -> None:
+        """Apply one configured physical decrease trigger."""
+        del run_variables, context
+        try:
+            await self.async_decrease_from_trigger()
+        except HomeAssistantError as err:
+            _LOGGER.warning(
+                "Nursery physical decrease action failed (%s)", type(err).__name__
+            )
+
+    def _log_physical_trigger_setup(
+        self, level: int, message: str, **kwargs: object
+    ) -> None:
+        """Prefix Home Assistant trigger setup logs with integration context."""
+        _LOGGER.log(level, "Physical control: %s", message, **kwargs)
 
     async def async_simulate_cry_event(self) -> None:
         """Inject one point-in-time cry event through the normal response path."""
@@ -436,6 +583,37 @@ class NurserySootherController:
             self._stage_simulated_events += 1
             self._record_cry_activity(now)
             await self._async_evaluate_cry_evidence(now)
+
+    async def async_toggle_from_trigger(self) -> None:
+        """Toggle a physical control between Standby and an active session."""
+        async with self._lock:
+            self._ensure_started()
+            if self.enabled:
+                await self._async_enter_standby("standby selected by physical control")
+                return
+            await self._async_set_active_level(SoothingLevel.BASELINE)
+
+    async def async_increase_from_trigger(self) -> None:
+        """Increase one exact level for an active physical-control command."""
+        async with self._lock:
+            self._ensure_started()
+            if not self.enabled:
+                return
+            requested = self.level.next_active()
+            if requested is None:
+                return
+            await self._async_set_active_level(requested)
+
+    async def async_decrease_from_trigger(self) -> None:
+        """Decrease one exact level for an active physical-control command."""
+        async with self._lock:
+            self._ensure_started()
+            if not self.enabled:
+                return
+            requested = self.level.previous_active()
+            if requested is None:
+                return
+            await self._async_set_active_level(requested)
 
     async def async_set_level(
         self,
@@ -2790,6 +2968,13 @@ class NurserySootherController:
         """Snapshot one stable string config value for this runtime."""
         value = self.entry.data.get(key)
         return value if isinstance(value, str) else None
+
+    def _trigger_configs(self, key: str) -> list[dict[str, Any]]:
+        """Snapshot one validated trigger sequence for this runtime."""
+        value = self.entry.data.get(key)
+        if not isinstance(value, list):
+            return []
+        return [dict(trigger) for trigger in value if isinstance(trigger, dict)]
 
     def _validate_controllable(self) -> None:
         """Reject parent commands that cannot be applied safely."""

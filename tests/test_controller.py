@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from dataclasses import dataclass, field
 from datetime import timedelta
@@ -867,6 +868,304 @@ async def test_standby_stops_owned_playback_and_exact_level_starts_it(
         ATTR_MEDIA_VOLUME_LEVEL
     ] == pytest.approx(LEVEL_2_PERCENT / 100)
     assert len(_media_calls(calls, SERVICE_PLAY_MEDIA)) == initial_play_count + 1
+
+
+@pytest.mark.parametrize("initial_level", ACTIVE_LEVELS, ids=lambda level: level.value)
+async def test_trigger_toggle_sends_every_active_level_to_standby(
+    started_controller: tuple[NurserySootherController, RecordedCalls],
+    initial_level: SoothingLevel,
+) -> None:
+    """A configured toggle turns off every active soothing level."""
+    controller, calls = started_controller
+    await controller.async_set_level(initial_level)
+    stop_count = len(_media_calls(calls, SERVICE_MEDIA_STOP))
+
+    await controller.async_toggle_from_trigger()
+
+    assert controller.level is SoothingLevel.STANDBY
+    assert controller.state is SootherState.STANDBY
+    assert controller.entry.options[CONF_LEVEL] == SoothingLevel.STANDBY.value
+    assert len(_media_calls(calls, SERVICE_MEDIA_STOP)) == stop_count + 1
+
+
+async def test_trigger_toggle_starts_baseline_from_standby(
+    started_controller: tuple[NurserySootherController, RecordedCalls],
+) -> None:
+    """A configured toggle starts the conservative Baseline output when off."""
+    controller, calls = started_controller
+    await controller.async_set_level(SoothingLevel.STANDBY)
+    play_count = len(_media_calls(calls, SERVICE_PLAY_MEDIA))
+    volume_count = len(_media_calls(calls, SERVICE_VOLUME_SET))
+
+    await controller.async_toggle_from_trigger()
+
+    assert controller.level is SoothingLevel.BASELINE
+    assert controller.state is SootherState.SOOTHING
+    assert controller.entry.options[CONF_LEVEL] == SoothingLevel.BASELINE.value
+    assert len(_media_calls(calls, SERVICE_PLAY_MEDIA)) == play_count + 1
+    assert len(_media_calls(calls, SERVICE_VOLUME_SET)) == volume_count + 1
+    assert _media_calls(calls, SERVICE_VOLUME_SET)[-1].data[
+        ATTR_MEDIA_VOLUME_LEVEL
+    ] == pytest.approx(BASELINE_PERCENT / 100)
+
+
+@pytest.mark.parametrize(
+    ("initial_level", "expected_level", "expected_volume"),
+    [
+        pytest.param(
+            SoothingLevel.BASELINE,
+            SoothingLevel.LEVEL_1,
+            LEVEL_1_PERCENT,
+            id="baseline-to-level-1",
+        ),
+        pytest.param(
+            SoothingLevel.LEVEL_1,
+            SoothingLevel.LEVEL_2,
+            LEVEL_2_PERCENT,
+            id="level-1-to-level-2",
+        ),
+        pytest.param(
+            SoothingLevel.LEVEL_2,
+            SoothingLevel.LEVEL_3,
+            LEVEL_3_PERCENT,
+            id="level-2-to-level-3",
+        ),
+        pytest.param(
+            SoothingLevel.LEVEL_3,
+            SoothingLevel.LEVEL_4,
+            LEVEL_4_PERCENT,
+            id="level-3-to-level-4",
+        ),
+    ],
+)
+async def test_trigger_increase_advances_one_level_while_locked(
+    started_controller: tuple[NurserySootherController, RecordedCalls],
+    initial_level: SoothingLevel,
+    expected_level: SoothingLevel,
+    expected_volume: float,
+) -> None:
+    """A configured increase directly advances exactly one level."""
+    controller, calls = started_controller
+    await controller.async_set_level(initial_level)
+    await controller.async_set_locked(locked=True)
+    volume_count = len(_media_calls(calls, SERVICE_VOLUME_SET))
+
+    await controller.async_increase_from_trigger()
+
+    assert controller.locked is True
+    assert controller.level is expected_level
+    assert controller.entry.options[CONF_LEVEL] == expected_level.value
+    assert len(_media_calls(calls, SERVICE_VOLUME_SET)) == volume_count + 1
+    assert _media_calls(calls, SERVICE_VOLUME_SET)[-1].data[
+        ATTR_MEDIA_VOLUME_LEVEL
+    ] == pytest.approx(expected_volume / 100)
+
+
+@pytest.mark.parametrize(
+    "boundary_level",
+    [SoothingLevel.STANDBY, SoothingLevel.LEVEL_4],
+    ids=("standby", "level-4"),
+)
+async def test_trigger_increase_is_a_no_op_at_boundaries(
+    started_controller: tuple[NurserySootherController, RecordedCalls],
+    boundary_level: SoothingLevel,
+) -> None:
+    """An increase neither starts playback nor exceeds the maximum level."""
+    controller, calls = started_controller
+    await controller.async_set_level(boundary_level)
+    media_count = len(calls.media)
+
+    await controller.async_increase_from_trigger()
+
+    assert controller.level is boundary_level
+    assert controller.entry.options[CONF_LEVEL] == boundary_level.value
+    assert len(calls.media) == media_count
+
+
+async def test_concurrent_trigger_increases_serialize_level_selection(
+    started_controller: tuple[NurserySootherController, RecordedCalls],
+) -> None:
+    """Queued increases each select the next level under the controller lock."""
+    controller, calls = started_controller
+    volume_count = len(_media_calls(calls, SERVICE_VOLUME_SET))
+
+    async with controller._lock:  # noqa: SLF001
+        increases = [
+            asyncio.create_task(controller.async_increase_from_trigger())
+            for _ in range(2)
+        ]
+        await asyncio.sleep(0)
+    await asyncio.gather(*increases)
+
+    assert controller.level is SoothingLevel.LEVEL_2
+    assert controller.entry.options[CONF_LEVEL] == SoothingLevel.LEVEL_2.value
+    assert len(_media_calls(calls, SERVICE_VOLUME_SET)) == volume_count + 2
+
+
+@pytest.mark.parametrize(
+    ("initial_level", "expected_level", "expected_volume"),
+    [
+        pytest.param(
+            SoothingLevel.LEVEL_1,
+            SoothingLevel.BASELINE,
+            BASELINE_PERCENT,
+            id="level-1-to-baseline",
+        ),
+        pytest.param(
+            SoothingLevel.LEVEL_2,
+            SoothingLevel.LEVEL_1,
+            LEVEL_1_PERCENT,
+            id="level-2-to-level-1",
+        ),
+        pytest.param(
+            SoothingLevel.LEVEL_3,
+            SoothingLevel.LEVEL_2,
+            LEVEL_2_PERCENT,
+            id="level-3-to-level-2",
+        ),
+        pytest.param(
+            SoothingLevel.LEVEL_4,
+            SoothingLevel.LEVEL_3,
+            LEVEL_3_PERCENT,
+            id="level-4-to-level-3",
+        ),
+    ],
+)
+async def test_trigger_decrease_moves_one_level_while_locked(
+    started_controller: tuple[NurserySootherController, RecordedCalls],
+    initial_level: SoothingLevel,
+    expected_level: SoothingLevel,
+    expected_volume: float,
+) -> None:
+    """A decrease gesture is direct parent control and moves one level."""
+    controller, calls = started_controller
+    await controller.async_set_level(initial_level)
+    await controller.async_set_locked(locked=True)
+    volume_count = len(_media_calls(calls, SERVICE_VOLUME_SET))
+
+    await controller.async_decrease_from_trigger()
+
+    assert controller.locked is True
+    assert controller.level is expected_level
+    assert controller.entry.options[CONF_LEVEL] == expected_level.value
+    assert len(_media_calls(calls, SERVICE_VOLUME_SET)) == volume_count + 1
+    assert _media_calls(calls, SERVICE_VOLUME_SET)[-1].data[
+        ATTR_MEDIA_VOLUME_LEVEL
+    ] == pytest.approx(expected_volume / 100)
+
+
+@pytest.mark.parametrize(
+    "boundary_level",
+    [SoothingLevel.STANDBY, SoothingLevel.BASELINE],
+    ids=("standby", "baseline"),
+)
+async def test_trigger_decrease_is_a_no_op_at_boundaries(
+    started_controller: tuple[NurserySootherController, RecordedCalls],
+    boundary_level: SoothingLevel,
+) -> None:
+    """A decrease gesture neither starts playback nor enters Standby."""
+    controller, calls = started_controller
+    await controller.async_set_level(boundary_level)
+    media_count = len(calls.media)
+
+    await controller.async_decrease_from_trigger()
+
+    assert controller.level is boundary_level
+    assert controller.entry.options[CONF_LEVEL] == boundary_level.value
+    assert len(calls.media) == media_count
+
+
+async def test_concurrent_trigger_decreases_serialize_level_selection(
+    started_controller: tuple[NurserySootherController, RecordedCalls],
+) -> None:
+    """Queued decrease gestures each select the prior level under the lock."""
+    controller, calls = started_controller
+    await controller.async_set_level(SoothingLevel.LEVEL_3)
+    volume_count = len(_media_calls(calls, SERVICE_VOLUME_SET))
+
+    async with controller._lock:  # noqa: SLF001
+        decreases = [
+            asyncio.create_task(controller.async_decrease_from_trigger())
+            for _ in range(2)
+        ]
+        await asyncio.sleep(0)
+    await asyncio.gather(*decreases)
+
+    assert controller.level is SoothingLevel.LEVEL_1
+    assert controller.entry.options[CONF_LEVEL] == SoothingLevel.LEVEL_1.value
+    assert len(_media_calls(calls, SERVICE_VOLUME_SET)) == volume_count + 2
+
+
+async def test_trigger_increase_preserves_safe_level_failure_handling(
+    hass: HomeAssistant,
+    started_controller: tuple[NurserySootherController, RecordedCalls],
+) -> None:
+    """A rejected physical increase cannot publish its requested level."""
+    controller, calls = started_controller
+
+    @callback
+    def _fail_volume(call: ServiceCall) -> None:
+        del call
+        error_message = "speaker rejected trigger volume"
+        raise HomeAssistantError(error_message)
+
+    hass.services.async_register("media_player", SERVICE_VOLUME_SET, _fail_volume)
+
+    with pytest.raises(HomeAssistantError) as error:
+        await controller.async_increase_from_trigger()
+
+    assert error.value.translation_key == "level_change_failed"
+    assert controller.level is SoothingLevel.BASELINE
+    assert controller.entry.options[CONF_LEVEL] == SoothingLevel.BASELINE.value
+    assert controller.state is SootherState.ATTENTION_REQUIRED
+    assert controller.recommendation is Recommendation.CHECK_DEVICES
+    hass.services.async_register("media_player", SERVICE_VOLUME_SET, calls.media.append)
+
+
+async def test_configured_event_triggers_dispatch_and_unsubscribe(
+    hass: HomeAssistant,
+    started_controller: tuple[NurserySootherController, RecordedCalls],
+) -> None:
+    """Generic HA triggers dispatch every action and detach during shutdown."""
+    controller, _ = started_controller
+    controller.toggle_triggers = [
+        {"platform": "event", "event_type": "test_physical_toggle"}
+    ]
+    controller.increase_level_triggers = [
+        {"platform": "event", "event_type": "test_physical_increase"}
+    ]
+    controller.decrease_level_triggers = [
+        {"platform": "event", "event_type": "test_physical_decrease"}
+    ]
+    await controller._async_attach_physical_control_triggers()  # noqa: SLF001
+
+    hass.bus.async_fire("test_physical_increase")
+    await asyncio.sleep(0)
+    await hass.async_block_till_done()
+    assert controller.level is SoothingLevel.LEVEL_1
+
+    hass.bus.async_fire("test_physical_decrease")
+    await asyncio.sleep(0)
+    await hass.async_block_till_done()
+    assert controller.level is SoothingLevel.BASELINE
+
+    await controller.async_set_level(SoothingLevel.STANDBY)
+    hass.bus.async_fire("test_physical_toggle")
+    await asyncio.sleep(0)
+    await hass.async_block_till_done()
+    assert controller.level is SoothingLevel.BASELINE
+    assert controller.diagnostics["physical_control"] == {
+        "configured": True,
+        "toggle_triggers_attached": True,
+        "increase_level_triggers_attached": True,
+        "decrease_level_triggers_attached": True,
+    }
+
+    assert await controller.async_shutdown()
+    hass.bus.async_fire("test_physical_toggle")
+    await asyncio.sleep(0)
+    await hass.async_block_till_done()
+    assert controller.level is SoothingLevel.BASELINE
 
 
 async def test_active_levels_using_same_sound_change_volume_without_restart(

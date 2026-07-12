@@ -5,12 +5,14 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, Any
 
+import voluptuous as vol
 from homeassistant.config_entries import (
     ConfigEntry,
     ConfigEntryError,
     ConfigEntryNotReady,
 )
 from homeassistant.core import valid_entity_id
+from homeassistant.helpers.selector import TriggerSelector
 
 from .const import (
     CONF_ATTENTION_SECONDS,
@@ -18,7 +20,9 @@ from .const import (
     CONF_BASELINE_VOLUME,
     CONF_CRY_GAP_SECONDS,
     CONF_DEBOUNCE_SECONDS,
+    CONF_DECREASE_LEVEL_TRIGGERS,
     CONF_EVIDENCE_WINDOW_SECONDS,
+    CONF_INCREASE_LEVEL_TRIGGERS,
     CONF_LEVEL,
     CONF_LEVEL_1_VOLUME,
     CONF_LEVEL_2_VOLUME,
@@ -30,6 +34,7 @@ from .const import (
     CONF_NOTIFY_TARGETS,
     CONF_SETTLING_SECONDS,
     CONF_SOUNDS,
+    CONF_TOGGLE_TRIGGERS,
     DEFAULT_OPTIONS,
     DOMAIN,
     ENTITY_DOMAINS,
@@ -66,10 +71,8 @@ _TIMER_KEYS = (
 )
 _LOCAL_MEDIA_PREFIX = "media-source://media_source/local/"
 _MOBILE_NOTIFY_PREFIX = "notify.mobile_app_"
-_LEGACY_ENTRY_VERSION = 4
-_LEGACY_DEFAULT_DEBOUNCE_SECONDS = 10
-_LEGACY_DEFAULT_LEVEL_UP_SECONDS = 30
 _SETUP_ROLLBACK_FAILED = "Nursery Soother setup could not safely stop speaker playback"
+_TRIGGER_SELECTOR = TriggerSelector()
 
 
 async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
@@ -141,8 +144,34 @@ def _functional_data_is_valid(entry: ConfigEntry[Any]) -> bool:
     )
 
 
+def _action_trigger_validation_error(entry: ConfigEntry[Any]) -> str | None:
+    """Return an error for unsafe action triggers, if any."""
+    seen_triggers: list[dict[str, Any]] = []
+    for config_key in (
+        CONF_TOGGLE_TRIGGERS,
+        CONF_INCREASE_LEVEL_TRIGGERS,
+        CONF_DECREASE_LEVEL_TRIGGERS,
+    ):
+        if config_key not in entry.data:
+            continue
+        trigger_config = entry.data.get(config_key)
+        if not isinstance(trigger_config, list) or not trigger_config:
+            return "invalid_action_triggers"
+        try:
+            validated = _TRIGGER_SELECTOR(trigger_config)
+        except TypeError, ValueError, vol.Invalid:
+            return "invalid_action_triggers"
+        if not validated:
+            return "invalid_action_triggers"
+        for trigger in validated:
+            if trigger in seen_triggers:
+                return "action_trigger_reused"
+            seen_triggers.append(trigger)
+    return None
+
+
 def _validate_entry_data(hass: HomeAssistant, entry: ConfigEntry[Any]) -> None:
-    """Validate persisted v6 data independently of the config flow."""
+    """Validate persisted v7 data independently of the config flow."""
     for config_key, expected_domain in ENTITY_DOMAINS.items():
         entity_id = entry.data.get(config_key)
         if not isinstance(entity_id, str) or not valid_entity_id(entity_id):
@@ -163,6 +192,12 @@ def _validate_entry_data(hass: HomeAssistant, entry: ConfigEntry[Any]) -> None:
             )
 
     _validate_entry_device_ownership(hass, entry)
+
+    if trigger_error := _action_trigger_validation_error(entry):
+        raise ConfigEntryError(
+            translation_domain=DOMAIN,
+            translation_key=trigger_error,
+        )
 
     raw_options = DEFAULT_OPTIONS | dict(entry.options)
     try:
@@ -201,32 +236,9 @@ def _validate_entry_data(hass: HomeAssistant, entry: ConfigEntry[Any]) -> None:
 
 
 async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry[Any]) -> bool:
-    """Migrate legacy timings and add the v6 level-lock default."""
-    if entry.version == ENTRY_VERSION:
-        return True
-    if entry.version not in {_LEGACY_ENTRY_VERSION, 5}:
-        return False
-
-    options = dict(entry.options)
-    if entry.version == _LEGACY_ENTRY_VERSION:
-        if (
-            options.get(CONF_DEBOUNCE_SECONDS, _LEGACY_DEFAULT_DEBOUNCE_SECONDS)
-            == _LEGACY_DEFAULT_DEBOUNCE_SECONDS
-        ):
-            options[CONF_DEBOUNCE_SECONDS] = DEFAULT_OPTIONS[CONF_DEBOUNCE_SECONDS]
-        if (
-            options.get(CONF_LEVEL_UP_SECONDS, _LEGACY_DEFAULT_LEVEL_UP_SECONDS)
-            == _LEGACY_DEFAULT_LEVEL_UP_SECONDS
-        ):
-            options[CONF_LEVEL_UP_SECONDS] = DEFAULT_OPTIONS[CONF_LEVEL_UP_SECONDS]
-    options.setdefault(CONF_LEVEL_LOCK, DEFAULT_OPTIONS[CONF_LEVEL_LOCK])
-
-    hass.config_entries.async_update_entry(
-        entry,
-        options=options,
-        version=ENTRY_VERSION,
-    )
-    return True
+    """Reject older entries; version 7 intentionally has no migration path."""
+    del hass
+    return entry.version == ENTRY_VERSION
 
 
 async def async_setup_entry(

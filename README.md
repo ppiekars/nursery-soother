@@ -120,6 +120,9 @@ Before setup, make these available in Home Assistant:
 - one or more Home Assistant Companion app notification actions named
   `notify.mobile_app_*`.
 
+A physical button is optional. If used, its desired actions must be exposed to
+Home Assistant as triggers by an integration such as ZHA or Zigbee2MQTT.
+
 The integration uses Home Assistant entity and action boundaries. Reolink and
 Sonos remain optional, and no vendor SDK is required. When the selected player
 is Sonos and exposes the required queue and repeat features plus its paired
@@ -160,12 +163,33 @@ The setup flow asks for the stable dependencies of one nursery:
 3. media player;
 4. a **Local media** sound for Baseline and each of Levels 1–4 (the same item
    may be selected more than once);
-5. one or more Companion app notification targets.
+5. one or more Companion app notification targets;
+6. optionally, any of the independently configured **Toggle trigger**,
+   **Increase trigger**, and **Decrease trigger** actions for a physical button.
 
 After setup, the level remains Standby and automatic operation remains off.
 Review every volume on the actual speaker before selecting an active level.
 Each cry sensor, camera, and speaker can belong to only one Nursery Soother
 entry, preventing two controllers from competing for the same device.
+
+### Optional physical-button triggers
+
+One useful mapping is short press to **Toggle trigger**, double press to
+**Increase trigger**, and long press to **Decrease trigger**. Each action is
+independently optional. Nursery Soother runs whichever Home Assistant trigger
+you select; it does not interpret or hardcode gesture names.
+
+- Toggle enters Baseline from Standby and enters Standby from any active level.
+- Increase moves up exactly one active level only while the soother is on. It
+  does nothing in Standby or at Level 4.
+- Decrease moves down exactly one active level only while the soother is on. It
+  does nothing in Standby or at Baseline.
+
+All three actions are direct parent commands, so Level lock does not block them.
+Normal dependency, playback-ownership, and Maximum-volume safeguards still
+apply. The fields use generic Home Assistant trigger selectors and work with
+the actions exposed by ZHA, Zigbee2MQTT, and other integrations; Nursery
+Soother contains no Sonoff- or other vendor-specific button handling.
 
 The initial defaults are intentionally low and conservative:
 
@@ -196,16 +220,13 @@ Volume settings must satisfy:
 The controller applies the hard maximum again at the media-player boundary.
 Use the config entry's **Configure** action to change volumes and timing. Use
 **Reconfigure** to replace the cry sensor, camera, speaker, per-level media, or
-notification targets. Reconfiguration preserves parent intent but never
-changes a Standby entry into an active level.
+notification targets, or to add, replace, or remove any physical-button action
+trigger. Reconfiguration preserves parent intent but never changes a Standby
+entry into an active level.
 
-During v4 migration, stored timings exactly equal to the former defaults—10
-seconds for debounce and 30 seconds for level dwell—are interpreted as legacy
-defaults and changed to 8 and 20 seconds. This also applies if those exact
-values were deliberately selected, because stored intent is indistinguishable.
-Other timing values are preserved. v5 entries receive Level lock off during
-the v6 migration. The fixed 2/8 initial and 1/6 continuing evidence thresholds
-apply to every current entry.
+Configuration-entry schema v7 deliberately has no migration or backward
+compatibility. Remove and re-add any existing Nursery Soother entry after
+updating to this version, then configure it again.
 
 ## Entities and standard actions
 
