@@ -33,10 +33,12 @@ from .const import (
     PLATFORMS,
 )
 from .controller import NurserySootherController
+from .frontend import FRONTEND_DOMAIN, async_register_frontend
 from .models import ACTIVE_LEVELS, SootherSettings, SoothingLevel
 
 if TYPE_CHECKING:
     from homeassistant.core import HomeAssistant
+    from homeassistant.helpers.typing import ConfigType
 
 type NurserySootherConfigEntry = ConfigEntry[NurserySootherController]
 
@@ -63,6 +65,22 @@ _MOBILE_NOTIFY_PREFIX = "notify.mobile_app_"
 _LEGACY_ENTRY_VERSION = 4
 _LEGACY_DEFAULT_DEBOUNCE_SECONDS = 10
 _LEGACY_DEFAULT_LEVEL_UP_SECONDS = 30
+
+
+async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
+    """Set up integration-global Nursery Soother resources."""
+    del config
+
+    if FRONTEND_DOMAIN in hass.config.components:
+        try:
+            await async_register_frontend(hass)
+        except Exception:  # noqa: BLE001
+            _LOGGER.warning(
+                "Nursery Soother dashboard card could not be registered; "
+                "native entity controls remain available",
+                exc_info=True,
+            )
+    return True
 
 
 def _validate_entry_device_ownership(

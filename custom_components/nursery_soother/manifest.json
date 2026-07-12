@@ -1,6 +1,7 @@
 {
   "domain": "nursery_soother",
   "name": "Nursery Soother",
+  "after_dependencies": ["frontend"],
   "codeowners": ["@ppiekars"],
   "config_flow": true,
   "documentation": "https://github.com/ppiekars/nursery-soother#readme",
