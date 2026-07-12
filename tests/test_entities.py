@@ -75,6 +75,20 @@ class _FakeController:
         self.recommendation = Recommendation.START
         self.suggested_level: SoothingLevel | None = None
         self.attention_required = False
+        self.status_attributes = {
+            "explanation": "standby",
+            "evidence": {
+                "events": 0,
+                "active_seconds": 0.0,
+                "event_threshold": 2,
+                "active_seconds_threshold": 8.0,
+                "sensor_active": False,
+                "observed_at": "2026-07-11T12:00:00+00:00",
+            },
+            "countdowns": {},
+            "next_countdown": None,
+            "next_countdown_at": None,
+        }
         self.settings = _FakeSettings()
         self.configured = True
         self.dependencies_available = True
@@ -313,6 +327,7 @@ async def test_enum_sensors_and_attention_binary_sensor(
     assert attention[0].device_class is BinarySensorDeviceClass.PROBLEM
     assert attention[0].is_on is False
     assert by_key["recommendation"].extra_state_attributes == {"suggested_level": None}
+    assert by_key["state"].extra_state_attributes == controller.status_attributes
 
     controller.state = SootherState.ATTENTION_REQUIRED
     controller.recommendation = Recommendation.INCREASE_LEVEL

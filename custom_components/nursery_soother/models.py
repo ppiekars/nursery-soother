@@ -85,6 +85,24 @@ class Recommendation(StrEnum):
     CHECK_DEVICES = "check_devices"
 
 
+class PolicyExplanation(StrEnum):
+    """Stable reasons that explain the controller's current policy phase."""
+
+    STANDBY = "standby"
+    SOOTHING = "soothing"
+    GATHERING_INITIAL_EVIDENCE = "gathering_initial_evidence"
+    CONFIRMATION_DEBOUNCE = "confirmation_debounce"
+    PROVISIONAL_RESPONSE = "provisional_response"
+    GATHERING_CONTINUING_EVIDENCE = "gathering_continuing_evidence"
+    LEVEL_DWELL = "level_dwell"
+    CAREGIVER_DECISION = "caregiver_decision"
+    CAREGIVER_ATTENTION = "caregiver_attention"
+    QUIET_STEP_DOWN = "quiet_step_down"
+    LEVEL_LOCKED = "level_locked"
+    ATTENTION_REQUIRED = "attention_required"
+    CHECK_DEVICES = "check_devices"
+
+
 LEVEL_VOLUME_KEYS: Final[dict[SoothingLevel, str]] = {
     SoothingLevel.BASELINE: CONF_BASELINE_VOLUME,
     SoothingLevel.LEVEL_1: CONF_LEVEL_1_VOLUME,

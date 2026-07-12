@@ -256,6 +256,27 @@ output control; state and recommendation explain what the policy is doing and
 why. When recommendation is `increase_level`, its `suggested_level` attribute
 contains the exact target such as `level_2`.
 
+The state sensor also exposes a structured, privacy-safe explanation contract
+for dashboards and automations. `explanation` is a stable machine-readable key;
+`evidence` contains the current event and active-time totals plus their current
+thresholds; and `countdowns` maps every active policy clock to an absolute UTC
+ISO 8601 deadline. `next_countdown` and `next_countdown_at` identify the earliest
+one as a convenience. Consumers should calculate remaining time from the
+absolute timestamp instead of expecting the integration to update every second.
+
+Countdown keys may include `confirmation_gate`, `level_dwell`,
+`provisional_rollback`, `cry_gap`, `quiet_step_down`, and `attention_deadline`.
+Several clocks can be active together because, for example, a response dwell,
+the cry-event gap, and the fixed attention deadline have different meanings.
+Expired or cancelled clocks are removed on the corresponding controller update.
+The custom dashboard card does not render these attributes yet.
+
+Explanation keys are `standby`, `soothing`, `gathering_initial_evidence`,
+`confirmation_debounce`, `provisional_response`,
+`gathering_continuing_evidence`, `level_dwell`, `caregiver_decision`,
+`caregiver_attention`, `quiet_step_down`, `level_locked`,
+`attention_required`, and `check_devices`.
+
 While an active level is selected, press **Simulate cry event** to inject one
 artificial rising-edge event without changing the physical sensor. Repeated
 presses can exercise the same event-count, evidence-window, manual suggestion,

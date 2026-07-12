@@ -318,6 +318,22 @@ The recommendation sensor exposes one of `none`, `start`, `wait`,
 For `increase_level`, the `suggested_level` attribute contains the exact target;
 consumers must not reconstruct it from translated text.
 
+The state sensor's attributes are the public explainability boundary. They
+contain a stable `explanation` key, a privacy-safe `evidence` snapshot, every
+active policy deadline in `countdowns`, and the earliest deadline duplicated as
+`next_countdown` plus `next_countdown_at`. Deadline values are absolute UTC ISO
+8601 timestamps, not decrementing second counts. This lets a dashboard render a
+smooth local countdown without polling or forcing Home Assistant state writes
+once per second. The evidence snapshot includes its `observed_at` timestamp and
+whether the cry sensor was active at that instant for the same reason.
+
+Countdowns represent distinct gates and outcomes, so several may coexist. A
+confirmation or level-dwell gate becoming eligible does not claim that evidence
+is sufficient; the event and active-time thresholds remain authoritative. Timer
+cancellation removes its corresponding deadline, and a one-shot controller
+refresh at an otherwise inactive gate boundary prevents expired timestamps from
+remaining in Home Assistant state.
+
 ## Cry evidence algorithm
 
 ### Event normalization

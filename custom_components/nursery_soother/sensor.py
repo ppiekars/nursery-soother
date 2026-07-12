@@ -63,9 +63,9 @@ class NurserySootherSensor(NurserySootherEntity, SensorEntity):
 
     @property
     def extra_state_attributes(self) -> dict[str, Any] | None:
-        """Expose the exact next level only while an increase is recommended."""
-        if self.entity_description.key != "recommendation":
-            return None
+        """Expose structured policy context without creating polling entities."""
+        if self.entity_description.key == "state":
+            return self._controller.status_attributes
         suggested_level = self._controller.suggested_level
         return {
             "suggested_level": (

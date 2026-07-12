@@ -7,6 +7,7 @@ import logging
 import secrets
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import timedelta
 from typing import TYPE_CHECKING, Any, TypeGuard
 from urllib.parse import parse_qsl, unquote, urlsplit
 
@@ -91,6 +92,7 @@ from .evidence import CryEvidence, EvidenceSnapshot
 from .models import (
     ACTIVE_LEVELS,
     LEVEL_VOLUME_KEYS,
+    PolicyExplanation,
     Recommendation,
     SootherSettings,
     SootherState,
@@ -204,6 +206,7 @@ class NurserySootherController:
         self._cancel_cry_gap: CALLBACK_TYPE | None = None
         self._cancel_settling: CALLBACK_TYPE | None = None
         self._cancel_attention: CALLBACK_TYPE | None = None
+        self._timer_deadlines: dict[str, datetime] = {}
         self._dependency_issues: set[str] = set()
         self._owns_playback = False
         self._playback_interrupted = False
@@ -333,6 +336,42 @@ class NurserySootherController:
             "last_reason": self._last_reason,
             "last_transition_at": self._last_transition_at.isoformat(),
             "last_error_type": self._last_error,
+        }
+
+    @property
+    def status_attributes(self) -> dict[str, Any]:
+        """Return privacy-safe evidence and countdown data for status consumers."""
+        now = dt_util.utcnow()
+        evidence = self._evidence.snapshot(now)
+        event_threshold, active_seconds_threshold = self._evidence_thresholds()
+        countdown_deadlines = self._countdown_deadlines(now)
+        countdowns = {
+            kind: deadline.isoformat()
+            for kind, deadline in sorted(
+                countdown_deadlines.items(), key=lambda item: item[1]
+            )
+        }
+        next_countdown = next(iter(countdowns), None)
+        return {
+            "explanation": self._policy_explanation(
+                now,
+                evidence,
+                event_threshold=event_threshold,
+                active_seconds_threshold=active_seconds_threshold,
+            ).value,
+            "evidence": {
+                "events": evidence.events,
+                "active_seconds": round(evidence.active_seconds, 3),
+                "event_threshold": event_threshold,
+                "active_seconds_threshold": active_seconds_threshold,
+                "sensor_active": self._physical_cry_is_on(),
+                "observed_at": now.isoformat(),
+            },
+            "countdowns": countdowns,
+            "next_countdown": next_countdown,
+            "next_countdown_at": (
+                countdowns[next_countdown] if next_countdown is not None else None
+            ),
         }
 
     @callback
@@ -1258,7 +1297,10 @@ class NurserySootherController:
             )
             return
 
-        delay: float | None = gate_remaining if evidence_ready else None
+        # Re-evaluate at the timing gate even when evidence is still incomplete.
+        # This does not authorize a response; it refreshes the public explanation
+        # when a countdown ends instead of leaving an expired deadline in HA state.
+        delay: float | None = gate_remaining if gate_remaining > 0 else None
         active_delay = self._evidence.seconds_until_active_threshold(
             now, active_seconds_threshold
         )
@@ -1379,6 +1421,7 @@ class NurserySootherController:
                 if self._cancel_provisional is not cancel_callback:
                     return
                 self._cancel_provisional = None
+                self._timer_deadlines.pop("provisional", None)
                 if (
                     episode != self._episode
                     or not self._provisional_level_1
@@ -1389,17 +1432,19 @@ class NurserySootherController:
                     "initial cry event was not confirmed"
                 )
 
-        cancel_callback = async_call_later(
-            self.hass,
+        timer_delay = (
             max(
                 float(self.settings.level_up_seconds),
                 self.settings.debounce_seconds + 0.001,
             )
             if delay is None
-            else delay,
-            _expired,
+            else float(delay)
         )
+        cancel_callback = async_call_later(self.hass, timer_delay, _expired)
         self._cancel_provisional = cancel_callback
+        self._timer_deadlines["provisional"] = dt_util.utcnow() + timedelta(
+            seconds=timer_delay
+        )
 
     async def _async_rollback_provisional_level_1(self, reason: str) -> None:
         """Safely undo an unconfirmed provisional Level 1 response."""
@@ -1437,21 +1482,24 @@ class NurserySootherController:
         )
 
     def _evaluate_after_stage_reset(self, now: datetime) -> None:
-        """Schedule held-sensor evidence after a stage consumes prior evidence."""
+        """Schedule the dwell refresh or held-sensor evidence evaluation."""
         active_delay = self._evidence.seconds_until_active_threshold(
             now, ESCALATION_CRY_ACTIVE_SECONDS_THRESHOLD
         )
-        if active_delay is not None:
-            dwell_remaining = (
-                max(
-                    0.0,
-                    self.settings.level_up_seconds
-                    - (now - self._last_level_change_at).total_seconds(),
-                )
-                if self._last_level_change_at is not None
-                else float(self.settings.level_up_seconds)
+        dwell_remaining = (
+            max(
+                0.0,
+                self.settings.level_up_seconds
+                - (now - self._last_level_change_at).total_seconds(),
             )
-            self._schedule_evidence(max(active_delay, dwell_remaining, 0.001))
+            if self._last_level_change_at is not None
+            else float(self.settings.level_up_seconds)
+        )
+        delay = dwell_remaining
+        if active_delay is not None:
+            delay = max(active_delay, dwell_remaining)
+        if delay > 0:
+            self._schedule_evidence(max(delay, 0.001))
 
     def _evidence_thresholds(self) -> tuple[int, float]:
         """Return conservative initial or responsive fresh-stage thresholds."""
@@ -1461,6 +1509,118 @@ class NurserySootherController:
                 ESCALATION_CRY_ACTIVE_SECONDS_THRESHOLD,
             )
         return INITIAL_CRY_EVENT_THRESHOLD, INITIAL_CRY_ACTIVE_SECONDS_THRESHOLD
+
+    def _policy_explanation(
+        self,
+        now: datetime,
+        evidence: EvidenceSnapshot,
+        *,
+        event_threshold: int,
+        active_seconds_threshold: float,
+    ) -> PolicyExplanation:
+        """Return one stable explanation for the current public policy state."""
+        if self.recommendation is Recommendation.CHECK_DEVICES:
+            explanation = PolicyExplanation.CHECK_DEVICES
+        elif self.state is SootherState.ATTENTION_REQUIRED:
+            explanation = PolicyExplanation.ATTENTION_REQUIRED
+        elif not self.enabled:
+            explanation = PolicyExplanation.STANDBY
+        elif self.locked and (self._incident_active or self._settling_deferred_by_lock):
+            explanation = PolicyExplanation.LEVEL_LOCKED
+        elif self._provisional_level_1:
+            explanation = PolicyExplanation.PROVISIONAL_RESPONSE
+        elif self.recommendation is Recommendation.INCREASE_LEVEL:
+            explanation = PolicyExplanation.CAREGIVER_DECISION
+        elif self.recommendation is Recommendation.ATTEND:
+            explanation = PolicyExplanation.CAREGIVER_ATTENTION
+        elif self.state is SootherState.SETTLING:
+            explanation = PolicyExplanation.QUIET_STEP_DOWN
+        elif self.state in {SootherState.CRY_PENDING, SootherState.RESPONDING}:
+            explanation = self._evidence_wait_explanation(
+                now,
+                evidence,
+                event_threshold=event_threshold,
+                active_seconds_threshold=active_seconds_threshold,
+            )
+        else:
+            explanation = PolicyExplanation.SOOTHING
+        return explanation
+
+    def _evidence_wait_explanation(
+        self,
+        now: datetime,
+        evidence: EvidenceSnapshot,
+        *,
+        event_threshold: int,
+        active_seconds_threshold: float,
+    ) -> PolicyExplanation:
+        """Explain whether evidence or its current timing gate is pending."""
+        evidence_ready = (
+            evidence.events >= event_threshold
+            or evidence.active_seconds >= active_seconds_threshold
+        )
+        if self.state is SootherState.CRY_PENDING:
+            gate_at = self._confirmation_gate_at()
+            waiting = PolicyExplanation.CONFIRMATION_DEBOUNCE
+            gathering = PolicyExplanation.GATHERING_INITIAL_EVIDENCE
+        else:
+            gate_at = self._level_dwell_at()
+            waiting = PolicyExplanation.LEVEL_DWELL
+            gathering = PolicyExplanation.GATHERING_CONTINUING_EVIDENCE
+        return (
+            waiting
+            if evidence_ready and gate_at is not None and gate_at > now
+            else gathering
+        )
+
+    def _countdown_deadlines(self, now: datetime) -> dict[str, datetime]:
+        """Return every active parent-facing policy deadline after ``now``."""
+        deadlines: dict[str, datetime] = {}
+        if (
+            self._incident_active
+            and not self._episode_confirmed
+            and (confirmation_at := self._confirmation_gate_at()) is not None
+            and confirmation_at > now
+        ):
+            deadlines["confirmation_gate"] = confirmation_at
+        if (
+            self._incident_active
+            and self._episode_confirmed
+            and (dwell_at := self._level_dwell_at()) is not None
+            and dwell_at > now
+        ):
+            deadlines["level_dwell"] = dwell_at
+
+        timer_names = {
+            "provisional": "provisional_rollback",
+            "cry_gap": "cry_gap",
+            "settling": "quiet_step_down",
+            "attention": "attention_deadline",
+        }
+        for timer_name, countdown_name in timer_names.items():
+            deadline = self._timer_deadlines.get(timer_name)
+            if deadline is None or deadline <= now:
+                continue
+            if timer_name == "cry_gap" and self._physical_cry_is_on():
+                continue
+            deadlines[countdown_name] = deadline
+        return deadlines
+
+    def _confirmation_gate_at(self) -> datetime | None:
+        """Return when initial evidence may first confirm the current episode."""
+        if self._episode_started_at is None:
+            return None
+        return self._episode_started_at + timedelta(
+            seconds=self.settings.debounce_seconds
+        )
+
+    def _level_dwell_at(self) -> datetime | None:
+        """Return when fresh evidence may next authorize a response."""
+        if self._last_level_change_at is None:
+            return None
+        return self._last_level_change_at + timedelta(
+            seconds=self.settings.level_up_seconds
+        )
 
     def _reset_evidence_stage(self, now: datetime) -> None:
         """Require fresh post-response evidence before another recommendation."""
@@ -1479,12 +1639,17 @@ class NurserySootherController:
                 if self._cancel_evidence is not cancel_callback:
                     return
                 self._cancel_evidence = None
+                self._timer_deadlines.pop("evidence", None)
                 if episode != self._episode:
                     return
                 await self._async_evaluate_cry_evidence(now)
 
-        cancel_callback = async_call_later(self.hass, delay, _expired)
+        timer_delay = max(float(delay), 0.001)
+        cancel_callback = async_call_later(self.hass, timer_delay, _expired)
         self._cancel_evidence = cancel_callback
+        self._timer_deadlines["evidence"] = dt_util.utcnow() + timedelta(
+            seconds=timer_delay
+        )
 
     def _schedule_cry_gap(self) -> None:
         """End an episode after no cry activity for the configured gap."""
@@ -1498,6 +1663,7 @@ class NurserySootherController:
                 if self._cancel_cry_gap is not cancel_callback:
                     return
                 self._cancel_cry_gap = None
+                self._timer_deadlines.pop("cry_gap", None)
                 if (
                     episode != self._episode
                     or activity_at != self._last_cry_activity_at
@@ -1514,6 +1680,9 @@ class NurserySootherController:
             self.hass, self.settings.cry_gap_seconds, _expired
         )
         self._cancel_cry_gap = cancel_callback
+        self._timer_deadlines["cry_gap"] = dt_util.utcnow() + timedelta(
+            seconds=self.settings.cry_gap_seconds
+        )
 
     async def _async_finish_cry_gap(
         self, now: datetime, activity_at: datetime | None
@@ -1547,11 +1716,17 @@ class NurserySootherController:
             await self._async_clear_notifications()
             return
         self._schedule_settling(
-            max(0.001, self.settings.settling_seconds - elapsed_quiet)
+            max(0.001, self.settings.settling_seconds - elapsed_quiet),
+            scheduled_at=now,
         )
         await self._async_clear_notifications()
 
-    def _schedule_settling(self, delay: float | None = None) -> None:
+    def _schedule_settling(
+        self,
+        delay: float | None = None,
+        *,
+        scheduled_at: datetime | None = None,
+    ) -> None:
         """Step down exactly one level after uninterrupted quiet."""
         self._cancel_timer("settling")
         if self.locked:
@@ -1561,11 +1736,11 @@ class NurserySootherController:
         cancel_callback: CALLBACK_TYPE | None = None
 
         async def _expired(now: datetime) -> None:
-            del now
             async with self._lock:
                 if self._cancel_settling is not cancel_callback:
                     return
                 self._cancel_settling = None
+                self._timer_deadlines.pop("settling", None)
                 if (
                     episode != self._episode
                     or not self._started
@@ -1605,14 +1780,16 @@ class NurserySootherController:
                     Recommendation.SETTLING,
                     f"quiet settling lowered to {lower_level.value}",
                 )
-                self._schedule_settling()
+                self._schedule_settling(scheduled_at=now)
 
-        cancel_callback = async_call_later(
-            self.hass,
-            self.settings.settling_seconds if delay is None else delay,
-            _expired,
+        timer_delay = (
+            float(self.settings.settling_seconds) if delay is None else float(delay)
         )
+        cancel_callback = async_call_later(self.hass, timer_delay, _expired)
         self._cancel_settling = cancel_callback
+        self._timer_deadlines["settling"] = (
+            scheduled_at or dt_util.utcnow()
+        ) + timedelta(seconds=timer_delay)
 
     def _schedule_attention(self) -> None:
         """Stop soothing and alert a parent at the fixed episode deadline."""
@@ -1626,6 +1803,7 @@ class NurserySootherController:
                 if self._cancel_attention is not cancel_callback:
                     return
                 self._cancel_attention = None
+                self._timer_deadlines.pop("attention", None)
                 if (
                     episode != self._episode
                     or confirmed_at != self._confirmed_at
@@ -1669,6 +1847,9 @@ class NurserySootherController:
             self.hass, self.settings.attention_seconds, _expired
         )
         self._cancel_attention = cancel_callback
+        self._timer_deadlines["attention"] = dt_util.utcnow() + timedelta(
+            seconds=self.settings.attention_seconds
+        )
 
     async def _async_notification_action(self, event: Event[dict[str, Any]]) -> None:
         """Accept only current actions belonging to this entry and episode."""
@@ -3166,6 +3347,7 @@ class NurserySootherController:
         if cancel is not None:
             cancel()
             setattr(self, attribute, None)
+        self._timer_deadlines.pop(timer, None)
 
     def _persist_settings(self) -> None:
         """Persist mutable entity settings without forcing a reload."""

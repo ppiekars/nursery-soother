@@ -68,6 +68,7 @@ from custom_components.nursery_soother.const import (
 from custom_components.nursery_soother.controller import NurserySootherController
 from custom_components.nursery_soother.models import (
     ACTIVE_LEVELS,
+    PolicyExplanation,
     Recommendation,
     SootherState,
     SoothingLevel,
@@ -1464,6 +1465,128 @@ async def test_manual_two_pulse_evidence_suggests_exact_next_level(
         assert "Acknowledge" not in titles
 
 
+async def test_status_attributes_expose_evidence_and_exact_utc_deadlines(
+    hass: HomeAssistant,
+    started_controller: tuple[NurserySootherController, RecordedCalls],
+) -> None:
+    """Status consumers receive thresholds and clocks, never ticking seconds."""
+    controller, _ = started_controller
+
+    initial = controller.status_attributes
+    assert initial["explanation"] == PolicyExplanation.SOOTHING.value
+    assert initial["evidence"] == {
+        "events": 0,
+        "active_seconds": 0.0,
+        "event_threshold": 2,
+        "active_seconds_threshold": 8.0,
+        "sensor_active": False,
+        "observed_at": "2026-07-11T12:00:00+00:00",
+    }
+    assert initial["countdowns"] == {}
+    assert initial["next_countdown"] is None
+    assert initial["next_countdown_at"] is None
+
+    await _cry_pulse(hass)
+    pending = controller.status_attributes
+    assert pending["explanation"] == (
+        PolicyExplanation.GATHERING_INITIAL_EVIDENCE.value
+    )
+    assert pending["evidence"]["events"] == 1
+    assert pending["countdowns"] == {
+        "confirmation_gate": "2026-07-11T12:00:08+00:00",
+        "cry_gap": "2026-07-11T12:01:00+00:00",
+    }
+    assert pending["next_countdown"] == "confirmation_gate"
+    assert pending["next_countdown_at"] == "2026-07-11T12:00:08+00:00"
+
+    await _cry_pulse(hass)
+    qualified = controller.status_attributes
+    assert qualified["explanation"] == PolicyExplanation.CONFIRMATION_DEBOUNCE
+
+    await _advance(hass, 9)
+    responding = controller.status_attributes
+    assert responding["explanation"] == PolicyExplanation.CAREGIVER_DECISION
+    assert responding["evidence"]["event_threshold"] == 1
+    assert responding["evidence"]["active_seconds_threshold"] == (
+        controller_module.ESCALATION_CRY_ACTIVE_SECONDS_THRESHOLD
+    )
+    assert responding["countdowns"]["level_dwell"] == (
+        controller._level_dwell_at().isoformat()  # noqa: SLF001
+    )
+    assert responding["countdowns"]["cry_gap"] == "2026-07-11T12:01:00+00:00"
+    assert responding["countdowns"]["attention_deadline"] == "2026-07-11T12:02:39+00:00"
+
+
+async def test_provisional_and_quiet_countdowns_follow_timer_lifecycle(
+    hass: HomeAssistant,
+    started_controller: tuple[NurserySootherController, RecordedCalls],
+) -> None:
+    """Provisional and quiet deadlines disappear exactly when timers end."""
+    controller, _ = started_controller
+    await controller.async_set_automatic(enabled=True)
+    await _cry_pulse(hass)
+
+    provisional = controller.status_attributes
+    assert provisional["explanation"] == PolicyExplanation.PROVISIONAL_RESPONSE
+    assert provisional["countdowns"] == {
+        "confirmation_gate": "2026-07-11T12:00:08+00:00",
+        "provisional_rollback": "2026-07-11T12:00:20+00:00",
+        "cry_gap": "2026-07-11T12:01:00+00:00",
+    }
+
+    await _advance(hass, 21)
+    rolled_back = controller.status_attributes
+    assert "confirmation_gate" not in rolled_back["countdowns"]
+    assert "provisional_rollback" not in rolled_back["countdowns"]
+    assert rolled_back["countdowns"] == {"cry_gap": "2026-07-11T12:01:00+00:00"}
+
+    await _advance(hass, 40)
+    settling = controller.status_attributes
+    assert settling["explanation"] == PolicyExplanation.QUIET_STEP_DOWN
+    assert settling["countdowns"] == {"quiet_step_down": "2026-07-11T12:02:00+00:00"}
+
+    await controller.async_set_level(SoothingLevel.STANDBY)
+    standby = controller.status_attributes
+    assert standby["explanation"] == PolicyExplanation.STANDBY
+    assert standby["countdowns"] == {}
+
+
+async def test_expired_confirmation_gate_is_removed_without_new_cry_evidence(
+    hass: HomeAssistant,
+    started_controller: tuple[NurserySootherController, RecordedCalls],
+) -> None:
+    """A one-event candidate refreshes status when its debounce gate expires."""
+    controller, _ = started_controller
+    await _cry_pulse(hass)
+
+    assert "confirmation_gate" in controller.status_attributes["countdowns"]
+    assert controller.diagnostics["timers"]["evidence"] is True
+
+    await _advance(hass, controller.settings.debounce_seconds + 1)
+
+    status = controller.status_attributes
+    assert status["explanation"] == (PolicyExplanation.GATHERING_INITIAL_EVIDENCE)
+    assert "confirmation_gate" not in status["countdowns"]
+    assert status["countdowns"] == {"cry_gap": "2026-07-11T12:01:00+00:00"}
+    assert controller.diagnostics["timers"]["evidence"] is False
+
+
+async def test_level_lock_explanation_cancels_policy_change_countdowns(
+    hass: HomeAssistant,
+    started_controller: tuple[NurserySootherController, RecordedCalls],
+) -> None:
+    """A lock is explicit and removes clocks for policy-driven level changes."""
+    controller, _ = started_controller
+    await controller.async_set_automatic(enabled=True)
+    await _cry_pulse(hass)
+    await controller.async_set_locked(locked=True)
+
+    status = controller.status_attributes
+    assert status["explanation"] == PolicyExplanation.LEVEL_LOCKED
+    assert "provisional_rollback" not in status["countdowns"]
+    assert "quiet_step_down" not in status["countdowns"]
+
+
 async def test_settling_timer_starts_only_after_cry_episode_ends(
     hass: HomeAssistant,
     started_controller: tuple[NurserySootherController, RecordedCalls],
@@ -1863,6 +1986,10 @@ async def test_unresolved_150_second_episode_enters_standby_and_attention(
     assert controller.recommendation is Recommendation.ATTEND
     assert controller.attention_required
     assert controller.locked is True
+    assert controller.status_attributes["countdowns"] == {}
+    assert controller.status_attributes["explanation"] == (
+        PolicyExplanation.ATTENTION_REQUIRED
+    )
     assert len(_media_calls(calls, SERVICE_MEDIA_STOP)) == stop_count + 1
 
 
