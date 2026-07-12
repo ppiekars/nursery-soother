@@ -65,11 +65,10 @@ class CryEvidence:
             return None
         started_at = self._active_started_at
         self._active_started_at = None
-        if now < started_at:
-            return None
-        self._active_intervals.append((started_at, now))
-        self._prune(now)
-        return (now - started_at).total_seconds()
+        end = max(now, started_at)
+        self._active_intervals.append((started_at, end))
+        self._prune(end)
+        return (end - started_at).total_seconds()
 
     def snapshot(self, now: datetime) -> EvidenceSnapshot:
         """Return rising-edge count and active seconds in the rolling window."""

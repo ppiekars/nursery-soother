@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 from homeassistant.components.media_player.const import (
@@ -10,7 +11,11 @@ from homeassistant.components.media_player.const import (
     SERVICE_PLAY_MEDIA,
     MediaPlayerEntityFeature,
 )
-from homeassistant.config_entries import ConfigEntryError, ConfigEntryState
+from homeassistant.config_entries import (
+    ConfigEntryError,
+    ConfigEntryNotReady,
+    ConfigEntryState,
+)
 from homeassistant.const import (
     ATTR_SUPPORTED_FEATURES,
     SERVICE_MEDIA_STOP,
@@ -20,9 +25,13 @@ from homeassistant.const import (
 )
 from homeassistant.core import ServiceCall, callback
 from homeassistant.helpers import entity_registry as er
-from pytest_homeassistant_custom_component.common import MockConfigEntry
+from pytest_homeassistant_custom_component.common import MockConfigEntry, mock_component
 
-from custom_components.nursery_soother import async_migrate_entry, async_setup_entry
+from custom_components.nursery_soother import (
+    async_migrate_entry,
+    async_setup,
+    async_setup_entry,
+)
 from custom_components.nursery_soother.const import (
     CONF_ATTENTION_SECONDS,
     CONF_AUTOMATIC_OPERATION,
@@ -49,6 +58,12 @@ from custom_components.nursery_soother.const import (
     ENTRY_VERSION,
     NAME,
     PLATFORMS,
+)
+from custom_components.nursery_soother.controller import NurserySootherController
+from custom_components.nursery_soother.frontend import (
+    CARD_MODULE_URL,
+    CARD_PATH,
+    CARD_URL,
 )
 from custom_components.nursery_soother.models import ACTIVE_LEVELS, SoothingLevel
 
@@ -97,6 +112,67 @@ TIMER_KEYS = (
     CONF_SETTLING_SECONDS,
     CONF_ATTENTION_SECONDS,
 )
+
+
+async def test_setup_registers_frontend_card_once(
+    hass: HomeAssistant,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The card is served and loaded once as an integration-global resource."""
+    register_static_paths = AsyncMock()
+    add_extra_js_url = Mock()
+    monkeypatch.setattr(
+        hass,
+        "http",
+        Mock(async_register_static_paths=register_static_paths),
+    )
+    monkeypatch.setattr(
+        "homeassistant.components.frontend.add_extra_js_url",
+        add_extra_js_url,
+    )
+
+    assert await async_setup(hass, {}) is True
+    register_static_paths.assert_not_awaited()
+    add_extra_js_url.assert_not_called()
+
+    mock_component(hass, "frontend")
+    assert await async_setup(hass, {}) is True
+    assert await async_setup(hass, {}) is True
+
+    register_static_paths.assert_awaited_once()
+    (static_paths,) = register_static_paths.await_args.args
+    assert len(static_paths) == 1
+    static_path = static_paths[0]
+    assert static_path.url_path == "/nursery_soother/nursery-soother-card.js"
+    assert static_path.url_path == CARD_URL
+    assert CARD_PATH.is_file()
+    assert static_path.path == str(CARD_PATH)
+    assert static_path.cache_headers is False
+    assert CARD_MODULE_URL.startswith(f"{CARD_URL}?v=")
+    add_extra_js_url.assert_called_once_with(hass, CARD_MODULE_URL)
+
+
+async def test_frontend_registration_failure_keeps_integration_available(
+    hass: HomeAssistant,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A broken optional card must not block the native entity integration."""
+    register_static_paths = AsyncMock(side_effect=RuntimeError("route failed"))
+    add_extra_js_url = Mock()
+    monkeypatch.setattr(
+        hass,
+        "http",
+        Mock(async_register_static_paths=register_static_paths),
+    )
+    monkeypatch.setattr(
+        "homeassistant.components.frontend.add_extra_js_url",
+        add_extra_js_url,
+    )
+    mock_component(hass, "frontend")
+
+    assert await async_setup(hass, {}) is True
+    register_static_paths.assert_awaited_once()
+    add_extra_js_url.assert_not_called()
 
 
 async def test_v6_standby_setup_reload_and_unload(hass: HomeAssistant) -> None:
@@ -510,3 +586,104 @@ async def test_setup_rejects_persisted_device_overlap(
     with pytest.raises(ConfigEntryError) as error:
         await async_setup_entry(hass, second)
     assert error.value.translation_key == "duplicate_devices"
+
+
+async def test_failed_setup_with_incomplete_rollback_requests_retry(
+    hass: HomeAssistant,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A controller that cannot stop during setup must not be marked loaded."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        title=NAME,
+        data=CONFIG_DATA,
+        options=DEFAULT_OPTIONS,
+        version=ENTRY_VERSION,
+    )
+    platforms_unloaded = False
+    runtime_aborted = False
+
+    async def _forward_setups(*args: object) -> None:
+        del args
+
+    async def _fail_start(self: NurserySootherController) -> None:
+        del self
+        error_message = "controller startup failed"
+        raise RuntimeError(error_message)
+
+    async def _incomplete_shutdown(self: NurserySootherController) -> bool:
+        del self
+        return False
+
+    async def _unload_platforms(*args: object) -> bool:
+        nonlocal platforms_unloaded
+        del args
+        platforms_unloaded = True
+        return True
+
+    async def _abort_startup(self: NurserySootherController) -> None:
+        nonlocal runtime_aborted
+        del self
+        runtime_aborted = True
+
+    monkeypatch.setattr(
+        hass.config_entries, "async_forward_entry_setups", _forward_setups
+    )
+    monkeypatch.setattr(
+        hass.config_entries, "async_unload_platforms", _unload_platforms
+    )
+    monkeypatch.setattr(NurserySootherController, "async_start", _fail_start)
+    monkeypatch.setattr(
+        NurserySootherController, "async_shutdown", _incomplete_shutdown
+    )
+    monkeypatch.setattr(NurserySootherController, "async_abort_startup", _abort_startup)
+
+    with pytest.raises(ConfigEntryNotReady) as error:
+        await async_setup_entry(hass, entry)
+
+    assert isinstance(error.value.__cause__, RuntimeError)
+    assert platforms_unloaded is True
+    assert runtime_aborted is True
+
+
+async def test_setup_preserves_original_error_when_platform_cleanup_fails(
+    hass: HomeAssistant,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cleanup errors must not mask the setup failure after a safe shutdown."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        title=NAME,
+        data=CONFIG_DATA,
+        options=DEFAULT_OPTIONS,
+        version=ENTRY_VERSION,
+    )
+
+    async def _forward_setups(*args: object) -> None:
+        del args
+
+    async def _fail_start(self: NurserySootherController) -> None:
+        del self
+        error_message = "original controller startup failure"
+        raise RuntimeError(error_message)
+
+    async def _complete_shutdown(self: NurserySootherController) -> bool:
+        del self
+        return True
+
+    async def _fail_platform_cleanup(*args: object) -> bool:
+        del args
+        error_message = "platform cleanup failed"
+        raise RuntimeError(error_message)
+
+    monkeypatch.setattr(
+        hass.config_entries, "async_forward_entry_setups", _forward_setups
+    )
+    monkeypatch.setattr(
+        hass.config_entries, "async_unload_platforms", _fail_platform_cleanup
+    )
+    monkeypatch.setattr(NurserySootherController, "async_start", _fail_start)
+    monkeypatch.setattr(NurserySootherController, "async_shutdown", _complete_shutdown)
+
+    with pytest.raises(RuntimeError, match="original controller startup failure"):
+        await async_setup_entry(hass, entry)

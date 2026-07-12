@@ -5,7 +5,11 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, Any
 
-from homeassistant.config_entries import ConfigEntry, ConfigEntryError
+from homeassistant.config_entries import (
+    ConfigEntry,
+    ConfigEntryError,
+    ConfigEntryNotReady,
+)
 from homeassistant.core import valid_entity_id
 
 from .const import (
@@ -33,10 +37,12 @@ from .const import (
     PLATFORMS,
 )
 from .controller import NurserySootherController
+from .frontend import FRONTEND_DOMAIN, async_register_frontend
 from .models import ACTIVE_LEVELS, SootherSettings, SoothingLevel
 
 if TYPE_CHECKING:
     from homeassistant.core import HomeAssistant
+    from homeassistant.helpers.typing import ConfigType
 
 type NurserySootherConfigEntry = ConfigEntry[NurserySootherController]
 
@@ -63,6 +69,23 @@ _MOBILE_NOTIFY_PREFIX = "notify.mobile_app_"
 _LEGACY_ENTRY_VERSION = 4
 _LEGACY_DEFAULT_DEBOUNCE_SECONDS = 10
 _LEGACY_DEFAULT_LEVEL_UP_SECONDS = 30
+_SETUP_ROLLBACK_FAILED = "Nursery Soother setup could not safely stop speaker playback"
+
+
+async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
+    """Set up integration-global Nursery Soother resources."""
+    del config
+
+    if FRONTEND_DOMAIN in hass.config.components:
+        try:
+            await async_register_frontend(hass)
+        except Exception:  # noqa: BLE001
+            _LOGGER.warning(
+                "Nursery Soother dashboard card could not be registered; "
+                "native entity controls remain available",
+                exc_info=True,
+            )
+    return True
 
 
 def _validate_entry_device_ownership(
@@ -217,15 +240,33 @@ async def async_setup_entry(
     try:
         await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
         await controller.async_start()
-    except Exception:
-        if await controller.async_shutdown():
+    except Exception as err:
+        rollback_complete = False
+        try:
+            rollback_complete = await controller.async_shutdown()
+        except Exception:  # noqa: BLE001
+            _LOGGER.debug(
+                "Nursery Soother controller cleanup failed during setup rollback",
+                exc_info=True,
+            )
+        if not rollback_complete:
+            try:
+                await controller.async_abort_startup()
+            except Exception:  # noqa: BLE001
+                _LOGGER.debug(
+                    "Nursery Soother runtime cleanup failed during setup rollback",
+                    exc_info=True,
+                )
+        try:
             await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
-            raise
-        _LOGGER.error(  # noqa: TRY400
-            "Nursery Soother setup could not roll back speaker playback; "
-            "keeping controls loaded for a safe retry"
-        )
-        return True
+        except Exception:  # noqa: BLE001
+            _LOGGER.debug(
+                "Nursery Soother platform cleanup failed during setup rollback",
+                exc_info=True,
+            )
+        if not rollback_complete:
+            raise ConfigEntryNotReady(_SETUP_ROLLBACK_FAILED) from err
+        raise
     return True
 
 

@@ -170,11 +170,17 @@ It provides:
 - episode-scoped, synchronized notifications;
 - gradual quiet downshift and a fixed attention cutoff;
 - speaker playback ownership checks and restart-safe recovery;
+- seamless Sonos looping through one queued item, crossfade, and repeat-all,
+  with direct-playback fallback for other speakers;
 - diagnostics with sensitive identifiers redacted.
 
 Reolink, Sonos, Apple, and other integrations continue to own connectivity.
 Nursery Soother owns only the policy, timers, level decisions, and guarded Home
-Assistant actions.
+Assistant actions. On compatible Sonos players it replaces the queue for the
+soothing session, cannot restore the prior queue items, and lets Sonos repeat
+one item natively; it does not periodically repopulate that queue. Normal stop
+restores the previous repeat and crossfade settings, while a parent playback
+takeover is left untouched.
 
 ## Home Assistant experience
 
@@ -210,7 +216,8 @@ button.nursery_soother_simulate_cry_event
 ```
 
 These entities work with native dashboards, automations, HomeKit Bridge, Apple
-Shortcuts, and Siri without a custom frontend card.
+Shortcuts, and Siri. The optional bundled Nursery Soother dashboard card adds a
+camera-first control surface without changing those standard entity boundaries.
 
 ## Deployment through HACS
 
@@ -248,6 +255,9 @@ The first level-based release includes:
 - gradual quiet step-down and fixed attention cutoff;
 - episode-scoped notifications without Acknowledge;
 - one artificial cry-event button;
+- an optional purpose-built camera and control dashboard card;
+- native one-item crossfade/repeat-all looping on compatible Sonos players,
+  with owned-idle recovery and generic-player fallback;
 - standard Home Assistant entities, diagnostics, and tested state transitions.
 
 Later releases can add:
@@ -255,8 +265,7 @@ Later releases can add:
 - schedules or bedtime windows;
 - multiple detection inputs and Frigate audio events;
 - long-term response analytics and evidence tuning tools;
-- richer notification previews;
-- a purpose-built mobile dashboard card.
+- richer notification previews.
 
 Backward compatibility with the earlier development-only Boost/Baseline model
 is not a product requirement. A clean removal and reintegration is preferable

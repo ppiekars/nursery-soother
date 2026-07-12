@@ -71,3 +71,18 @@ def test_duplicate_edges_do_not_inflate_evidence() -> None:
     snapshot = evidence.snapshot(NOW + timedelta(seconds=5))
     assert snapshot.events == TWO_EVENTS
     assert snapshot.active_seconds == pytest.approx(3)
+
+
+def test_clock_skew_clamps_pulse_to_zero_duration() -> None:
+    """A backward off timestamp still closes and records the active pulse."""
+    evidence = CryEvidence(window_seconds=30)
+    evidence.reset(NOW)
+    started_at = NOW + timedelta(seconds=5)
+
+    assert evidence.record_on(started_at)
+    assert evidence.record_off(NOW) == pytest.approx(0)
+    assert not evidence.active
+
+    snapshot = evidence.snapshot(started_at)
+    assert snapshot.events == 1
+    assert snapshot.active_seconds == pytest.approx(0)

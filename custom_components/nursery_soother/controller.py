@@ -6,13 +6,19 @@ import asyncio
 import logging
 import secrets
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, TypeGuard
 from urllib.parse import parse_qsl, unquote, urlsplit
 
+from homeassistant.components.media_player import MediaPlayerEnqueue, RepeatMode
 from homeassistant.components.media_player.const import (
+    ATTR_GROUP_MEMBERS,
     ATTR_MEDIA_CONTENT_ID,
     ATTR_MEDIA_CONTENT_TYPE,
+    ATTR_MEDIA_ENQUEUE,
+    ATTR_MEDIA_REPEAT,
     ATTR_MEDIA_VOLUME_LEVEL,
+    SERVICE_CLEAR_PLAYLIST,
     SERVICE_PLAY_MEDIA,
     MediaPlayerEntityFeature,
     MediaPlayerState,
@@ -29,10 +35,15 @@ from homeassistant.const import (
     EVENT_SERVICE_REMOVED,
     SERVICE_MEDIA_PAUSE,
     SERVICE_MEDIA_STOP,
+    SERVICE_REPEAT_SET,
+    SERVICE_TURN_OFF,
+    SERVICE_TURN_ON,
     SERVICE_VOLUME_SET,
+    STATE_OFF,
     STATE_ON,
     STATE_UNAVAILABLE,
     STATE_UNKNOWN,
+    Platform,
 )
 from homeassistant.core import (
     Context,
@@ -41,7 +52,8 @@ from homeassistant.core import (
     HomeAssistant,
     callback,
 )
-from homeassistant.exceptions import ServiceValidationError
+from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.event import async_call_later, async_track_state_change_event
 from homeassistant.helpers.network import is_hass_url
 from homeassistant.util import dt as dt_util
@@ -85,6 +97,8 @@ if TYPE_CHECKING:
 _LOGGER = logging.getLogger(__name__)
 SERVICE_CALL_TIMEOUT = 10
 FAILED_PLAY_COMPENSATION_SECONDS = 15
+NATIVE_LOOP_CONFIRMATION_SECONDS = 5.0
+NATIVE_LOOP_CONFIRMATION_POLL_SECONDS = 0.1
 AUTH_SIGNATURE_QUERY_PARAMETER = "authSig"
 LOCAL_MEDIA_URL_PREFIX = "/media/"
 INITIAL_CRY_EVENT_THRESHOLD = 2
@@ -100,12 +114,31 @@ _REQUIRED_MEDIA_PLAYER_FEATURES = (
 _STOP_MEDIA_PLAYER_FEATURES = (
     MediaPlayerEntityFeature.STOP | MediaPlayerEntityFeature.PAUSE
 )
+_NATIVE_LOOP_MEDIA_PLAYER_FEATURES = (
+    MediaPlayerEntityFeature.CLEAR_PLAYLIST
+    | MediaPlayerEntityFeature.MEDIA_ENQUEUE
+    | MediaPlayerEntityFeature.REPEAT_SET
+)
+SONOS_PLATFORM = "sonos"
+SONOS_CROSSFADE_UNIQUE_ID_SUFFIX = "-cross_fade"
+
+
+@dataclass(frozen=True, slots=True)
+class _NativeLoopSettings:
+    """Speaker settings captured for one integration-owned loop session."""
+
+    crossfade_entity_id: str
+    previous_repeat: str
+    previous_crossfade: str
+    group_members: tuple[str, ...]
 
 
 class NurserySootherController:
     """Coordinate nursery inputs, timers, speaker effects, and parents."""
 
-    def __init__(self, hass: HomeAssistant, entry: ConfigEntry[Any]) -> None:
+    def __init__(  # noqa: PLR0915
+        self, hass: HomeAssistant, entry: ConfigEntry[Any]
+    ) -> None:
         """Initialize a controller from one config entry."""
         self.hass = hass
         self.entry = entry
@@ -132,10 +165,11 @@ class NurserySootherController:
         self._episode = 0
         self._action_generation = 0
         self._session_id = secrets.token_hex(8)
-        self._incident_active = self._episode_confirmed = self._provisional_level_1 = (
-            False
-        )
-        self._initial_level_1_applied = self._settling_deferred_by_lock = False
+        self._incident_active = False
+        self._episode_confirmed = False
+        self._provisional_level_1 = False
+        self._initial_level_1_applied = False
+        self._settling_deferred_by_lock = False
         self._episode_started_at: datetime | None = None
         self._confirmed_at: datetime | None = None
         self._last_cry_activity_at: datetime | None = None
@@ -163,6 +197,10 @@ class NurserySootherController:
         self._failed_play_context_ids: set[str] = set()
         self._failed_play_media_content_ids: dict[str, str] = {}
         self._failed_play_expiries: dict[str, CALLBACK_TYPE] = {}
+        self._failed_native_loop_context_ids: set[str] = set()
+        self._native_loop_settings: _NativeLoopSettings | None = None
+        self._native_loop_active = False
+        self._native_loop_force_restore = False
         self._started = False
         self._lock = asyncio.Lock()
 
@@ -249,6 +287,7 @@ class NurserySootherController:
             },
             "playback_owned": self._owns_playback,
             "playback_interrupted": self._playback_interrupted,
+            "native_crossfade_loop_active": self._native_loop_active,
             "timers": {
                 "evidence": self._cancel_evidence is not None,
                 "provisional": self._cancel_provisional is not None,
@@ -357,13 +396,31 @@ class NurserySootherController:
             stopped = await self._async_stop_playback()
             if not stopped or self._failed_play_context_ids:
                 return False
-            self._started = False
-            self._episode += 1
-            self._cancel_all_timers()
-            for unsubscribe in self._unsubscribers:
-                unsubscribe()
-            self._unsubscribers.clear()
+            self._stop_runtime_work()
             return stopped
+
+    async def async_abort_startup(self) -> None:
+        """Detach a failed setup attempt even when playback could not be stopped."""
+        async with self._lock:
+            self._stop_runtime_work()
+
+    def _stop_runtime_work(self) -> None:
+        """Cancel listeners and timers owned by this controller instance."""
+        self._started = False
+        self._episode += 1
+        self._cancel_all_timers()
+        for unsubscribe in self._unsubscribers:
+            unsubscribe()
+        self._unsubscribers.clear()
+        for cancel in self._failed_play_expiries.values():
+            cancel()
+        self._failed_play_expiries.clear()
+        self._failed_play_context_ids.clear()
+        self._failed_play_media_content_ids.clear()
+        self._failed_native_loop_context_ids.clear()
+        self._native_loop_settings = None
+        self._native_loop_active = False
+        self._native_loop_force_restore = False
 
     async def async_simulate_cry_event(self) -> None:
         """Inject one point-in-time cry event through the normal response path."""
@@ -396,6 +453,21 @@ class NurserySootherController:
             ):
                 return
             if requested is self.level:
+                if (
+                    requested is SoothingLevel.STANDBY
+                    and (
+                        self._native_loop_active
+                        or self._native_loop_settings is not None
+                    )
+                    and not await self._async_stop_playback()
+                ):
+                    self._transition(
+                        SootherState.ATTENTION_REQUIRED,
+                        Recommendation.CHECK_DEVICES,
+                        "speaker loop cleanup failed",
+                    )
+                    await self._async_notify_dependency_problem()
+                    return
                 if requested is SoothingLevel.STANDBY and self._playback_interrupted:
                     self._playback_interrupted = False
                     self._transition(
@@ -430,7 +502,17 @@ class NurserySootherController:
         now = dt_util.utcnow()
         if not await self._async_apply_level(previous_media):
             self._restore_level_after_failed_effect(previous_level)
-            return
+            if self.state is not SootherState.ATTENTION_REQUIRED:
+                self._transition(
+                    SootherState.ATTENTION_REQUIRED,
+                    Recommendation.CHECK_DEVICES,
+                    "parent-selected level could not be applied",
+                )
+                await self._async_notify_dependency_problem()
+            raise HomeAssistantError(
+                translation_domain=DOMAIN,
+                translation_key="level_change_failed",
+            )
         self._cancel_provisional_response()
         self._persist_settings()
 
@@ -539,6 +621,8 @@ class NurserySootherController:
                     await self._async_evaluate_cry_evidence(now)
             else:
                 self._emit_update()
+                if requested and self.enabled and self._incident_active:
+                    await self._async_evaluate_cry_evidence(now)
 
     async def async_set_locked(self, *, locked: bool) -> None:
         """Freeze or resume policy-driven level changes."""
@@ -662,7 +746,9 @@ class NurserySootherController:
             return await self._async_set_speaker_volume(
                 self.settings.volume_for_level(self.level)
             )
-        if self._owns_playback and not await self._async_stop_playback():
+        if self._owns_playback and not await self._async_stop_playback(
+            preserve_native_loop_session=True
+        ):
             return False
         return await self._async_ensure_playback()
 
@@ -740,7 +826,7 @@ class NurserySootherController:
             if self.media_player is not None
             else None
         )
-        if (
+        should_restart = (
             self._owns_playback
             and current_state is not None
             and current_state.state
@@ -749,8 +835,25 @@ class NurserySootherController:
                 MediaPlayerState.OFF,
                 MediaPlayerState.PAUSED,
             }
-        ):
-            await self._async_ensure_playback()
+        )
+        if not should_restart:
+            return
+        self._clear_playback_ownership()
+        if not await self._async_ensure_playback():
+            await self._async_handle_playback_recovery_failure(
+                "owned playback recovery failed"
+            )
+
+    async def _async_handle_playback_recovery_failure(self, reason: str) -> None:
+        """Expose a failed restart instead of claiming silent soothing."""
+        if self.state is SootherState.ATTENTION_REQUIRED:
+            return
+        self._transition(
+            SootherState.ATTENTION_REQUIRED,
+            Recommendation.CHECK_DEVICES,
+            reason,
+        )
+        await self._async_notify_dependency_problem()
 
     async def _async_service_changed(self, event: Event[dict[str, Any]]) -> None:
         """Reconcile health when a configured mobile notification action changes."""
@@ -827,6 +930,9 @@ class NurserySootherController:
         await self._async_notify_recovery()
         self._new_episode()
         if not self._owns_playback and not await self._async_ensure_playback():
+            await self._async_handle_playback_recovery_failure(
+                "dependency recovery could not restart playback"
+            )
             return
         self._transition(
             SootherState.SOOTHING,
@@ -859,8 +965,6 @@ class NurserySootherController:
         """Extend the event episode and restart its quiet clocks."""
         self._last_cry_activity_at = now
         self._schedule_cry_gap()
-        if not self.locked:
-            self._schedule_settling()
 
     async def _async_evaluate_cry_evidence(self, now: datetime) -> None:
         """Confirm or advance an episode once evidence and timing both allow it."""
@@ -875,6 +979,7 @@ class NurserySootherController:
         if (
             not self._episode_confirmed
             and not self._provisional_level_1
+            and not self._initial_level_1_applied
             and self.automatic
             and not self.locked
             and self.level is SoothingLevel.BASELINE
@@ -938,6 +1043,8 @@ class NurserySootherController:
         simulated_only: bool,
     ) -> None:
         """Raise one level automatically or send one exact manual suggestion."""
+        if not self._provisional_level_1:
+            self._initial_level_1_applied = False
         provisional_started_at = (
             self._last_level_change_at if self._initial_level_1_applied else None
         )
@@ -1062,7 +1169,7 @@ class NurserySootherController:
 
     async def _async_rollback_provisional_level_1(self, reason: str) -> None:
         """Safely undo an unconfirmed provisional Level 1 response."""
-        self._cancel_provisional_response()
+        self._cancel_provisional_response(clear_initial=False)
         if self.level is not SoothingLevel.LEVEL_1:
             return
         previous_media = self._media_for_level(SoothingLevel.LEVEL_1)
@@ -1074,11 +1181,12 @@ class NurserySootherController:
         self._last_level_change_at = None
         self._transition(SootherState.CRY_PENDING, Recommendation.WAIT, reason)
 
-    def _cancel_provisional_response(self) -> None:
+    def _cancel_provisional_response(self, *, clear_initial: bool = True) -> None:
         """Clear provisional policy state without changing the selected level."""
         self._cancel_timer("provisional")
         self._provisional_level_1 = False
-        self._initial_level_1_applied = False
+        if clear_initial:
+            self._initial_level_1_applied = False
 
     async def _async_fail_safe_notification_delivery(self) -> None:
         """Stop owned output when no caregiver notification can be delivered."""
@@ -1165,8 +1273,6 @@ class NurserySootherController:
                 if self._physical_cry_is_on():
                     self._last_cry_activity_at = now
                     self._schedule_cry_gap()
-                    if not self.locked:
-                        self._schedule_settling()
                     return
                 await self._async_finish_cry_gap(now, activity_at)
 
@@ -1345,9 +1451,16 @@ class NurserySootherController:
                 level = SoothingLevel(command.removeprefix(level_prefix))
             except ValueError:
                 return
-            await self.async_set_level(
-                level, expected_action_generation=action_generation
-            )
+            try:
+                await self.async_set_level(
+                    level, expected_action_generation=action_generation
+                )
+            except HomeAssistantError as err:
+                _LOGGER.warning(
+                    "Nursery notification level action failed for %s (%s)",
+                    level,
+                    type(err).__name__,
+                )
         elif command == ACTION_SET_MANUAL:
             await self.async_set_automatic(
                 enabled=False,
@@ -1575,7 +1688,7 @@ class NurserySootherController:
         return True
 
     async def _async_ensure_playback(self) -> bool:
-        """Set a capped current volume and start the configured media."""
+        """Set a capped volume and start either native looping or direct media."""
         media_player = self.media_player
         if (
             not self.enabled
@@ -1585,11 +1698,246 @@ class NurserySootherController:
             return False
         target = self.settings.volume_for_level(self.level)
         if not await self._async_set_speaker_volume(target, require_owned=False):
+            if self._native_loop_settings is not None:
+                await self._async_cleanup_native_loop(
+                    clear_queue=self._native_loop_active,
+                    end_session=True,
+                )
             self._playback_interrupted = True
             return False
 
         media = self._media_for_level(self.level)
         if media is None:
+            if self._native_loop_settings is not None:
+                await self._async_cleanup_native_loop(
+                    clear_queue=self._native_loop_active,
+                    end_session=True,
+                )
+            return False
+        crossfade_entity_id = self._sonos_crossfade_entity_id()
+        if self._native_loop_settings is not None:
+            crossfade_entity_id = self._native_loop_settings.crossfade_entity_id
+        if crossfade_entity_id is not None and self._native_crossfade_loop_supported(
+            crossfade_entity_id
+        ):
+            return await self._async_start_native_crossfade_loop(
+                media, crossfade_entity_id
+            )
+        if self._native_loop_settings is not None:
+            self._last_error = "native_crossfade_loop_unavailable"
+            await self._async_cleanup_native_loop(
+                clear_queue=self._native_loop_active,
+                end_session=True,
+            )
+            self._playback_interrupted = True
+            return False
+        return await self._async_start_configured_media(media)
+
+    async def _async_start_native_crossfade_loop(  # noqa: C901, PLR0911, PLR0912
+        self, media: dict[str, Any], crossfade_entity_id: str
+    ) -> bool:
+        """Build one Sonos queue item and let repeat-all loop it natively."""
+        if self._native_loop_settings is None:
+            settings = self._capture_native_loop_settings(crossfade_entity_id)
+            if settings is None:
+                return await self._async_start_configured_media(media)
+            self._native_loop_settings = settings
+
+        if not await self._async_native_queue_can_be_replaced():
+            await self._async_cleanup_native_loop(clear_queue=False, end_session=True)
+            await self._async_handle_playback_recovery_failure(
+                "speaker became active before Sonos queue setup"
+            )
+            return False
+
+        crossfade_state = self.hass.states.get(crossfade_entity_id)
+        if crossfade_state is None:
+            await self._async_cleanup_native_loop(clear_queue=False, end_session=True)
+            return False
+        if crossfade_state.state == STATE_OFF:
+            self._native_loop_force_restore = True
+            crossfade_enabled = await self._async_call_entity(
+                Platform.SWITCH,
+                SERVICE_TURN_ON,
+                crossfade_entity_id,
+                {},
+            ) and await self._async_wait_for_entity_state(crossfade_entity_id, STATE_ON)
+            if not crossfade_enabled:
+                self._last_error = "native_crossfade_not_confirmed"
+                if await self._async_native_queue_can_be_replaced():
+                    await self._async_cleanup_native_loop(
+                        clear_queue=False, end_session=True
+                    )
+                await self._async_handle_playback_recovery_failure(
+                    "Sonos crossfade could not be confirmed"
+                )
+                return False
+            self._native_loop_force_restore = False
+
+        if not await self._async_native_queue_can_be_replaced():
+            await self._async_handle_playback_recovery_failure(
+                "speaker takeover during Sonos queue setup"
+            )
+            return False
+
+        if not await self._async_call_media(SERVICE_CLEAR_PLAYLIST, {}):
+            await self._async_cleanup_native_loop(clear_queue=False, end_session=True)
+            return False
+        if not await self._async_native_queue_can_be_replaced():
+            await self._async_handle_playback_recovery_failure(
+                "speaker takeover after Sonos queue clear"
+            )
+            return False
+
+        self._native_loop_active = True
+        if not await self._async_start_configured_media(
+            media,
+            {ATTR_MEDIA_ENQUEUE: MediaPlayerEnqueue.PLAY},
+            native_loop=True,
+        ):
+            await self._async_cleanup_native_loop(clear_queue=True, end_session=True)
+            return False
+
+        if not await self._async_wait_for_owned_playback():
+            await self._async_handle_unconfirmed_native_playback()
+            return False
+
+        self._native_loop_force_restore = True
+        repeat_enabled = await self._async_call_media(
+            SERVICE_REPEAT_SET, {ATTR_MEDIA_REPEAT: RepeatMode.ALL}
+        ) and await self._async_wait_for_media_repeat(RepeatMode.ALL)
+        if not repeat_enabled:
+            self._last_error = "native_repeat_not_confirmed"
+            await self._async_stop_playback()
+            await self._async_handle_playback_recovery_failure(
+                "Sonos repeat-all could not be confirmed"
+            )
+            return False
+        self._native_loop_force_restore = False
+        return True
+
+    async def _async_native_queue_can_be_replaced(self) -> bool:
+        """Recheck the speaker immediately before destructive queue setup."""
+        media_state = (
+            self.hass.states.get(self.media_player)
+            if self.media_player is not None
+            else None
+        )
+        if media_state is None:
+            return False
+        if media_state.state in {
+            MediaPlayerState.IDLE,
+            MediaPlayerState.OFF,
+            MediaPlayerState.PAUSED,
+        }:
+            return True
+        if media_state.state in {
+            MediaPlayerState.PLAYING,
+            MediaPlayerState.BUFFERING,
+        }:
+            if self._owns_playback:
+                await self._async_playback_is_owned_now(notify_interruption=False)
+            else:
+                self._relinquish_playback()
+                await self._async_finalize_playback_interruption(notify=False)
+        return False
+
+    async def _async_wait_for_entity_state(
+        self, entity_id: str, expected_state: str
+    ) -> bool:
+        """Wait briefly for a subscription-backed entity to confirm a command."""
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + NATIVE_LOOP_CONFIRMATION_SECONDS
+        while True:
+            state = self.hass.states.get(entity_id)
+            if state is not None and state.state == expected_state:
+                return True
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                return False
+            await asyncio.sleep(min(NATIVE_LOOP_CONFIRMATION_POLL_SECONDS, remaining))
+
+    async def _async_wait_for_media_repeat(self, expected_repeat: str) -> bool:
+        """Wait briefly for Sonos to publish the requested repeat mode."""
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + NATIVE_LOOP_CONFIRMATION_SECONDS
+        while True:
+            state = (
+                self.hass.states.get(self.media_player)
+                if self.media_player is not None
+                else None
+            )
+            if (
+                state is not None
+                and state.attributes.get(ATTR_MEDIA_REPEAT) == expected_repeat
+            ):
+                return True
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                return False
+            await asyncio.sleep(min(NATIVE_LOOP_CONFIRMATION_POLL_SECONDS, remaining))
+
+    async def _async_wait_for_owned_playback(self) -> bool:
+        """Wait for the queued item to become identifiable before changing repeat."""
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + NATIVE_LOOP_CONFIRMATION_SECONDS
+        while self._owns_playback:
+            media_state = (
+                self.hass.states.get(self.media_player)
+                if self.media_player is not None
+                else None
+            )
+            if media_state is not None and media_state.state in {
+                MediaPlayerState.PLAYING,
+                MediaPlayerState.BUFFERING,
+            }:
+                if await self._async_playback_is_owned_now(notify_interruption=False):
+                    return True
+                if not self._owns_playback:
+                    return False
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                return False
+            await asyncio.sleep(min(NATIVE_LOOP_CONFIRMATION_POLL_SECONDS, remaining))
+        return False
+
+    async def _async_handle_unconfirmed_native_playback(self) -> None:
+        """Fail safe without touching active media that could belong to a parent."""
+        media_state = (
+            self.hass.states.get(self.media_player)
+            if self.media_player is not None
+            else None
+        )
+        if media_state is not None and media_state.state in {
+            MediaPlayerState.IDLE,
+            MediaPlayerState.OFF,
+            MediaPlayerState.PAUSED,
+        }:
+            self._clear_playback_ownership()
+            await self._async_cleanup_native_loop(clear_queue=True, end_session=True)
+        elif self._owns_playback:
+            pending_context_id = self._pending_play_context_id
+            if pending_context_id is not None:
+                self._failed_native_loop_context_ids.add(pending_context_id)
+                self._track_failed_play_context(
+                    pending_context_id, self._configured_media_content_id()
+                )
+            self._relinquish_playback()
+            await self._async_finalize_playback_interruption(notify=False)
+        await self._async_handle_playback_recovery_failure(
+            "Sonos queued playback could not be confirmed"
+        )
+
+    async def _async_start_configured_media(
+        self,
+        media: dict[str, Any],
+        extra_data: dict[str, Any] | None = None,
+        *,
+        native_loop: bool = False,
+    ) -> bool:
+        """Start configured media while retaining strict playback ownership."""
+        media_player = self.media_player
+        if media_player is None:
             return False
         play_context = Context()
         self._playback_interrupted = False
@@ -1602,9 +1950,12 @@ class NurserySootherController:
             {
                 ATTR_MEDIA_CONTENT_ID: media[ATTR_MEDIA_CONTENT_ID],
                 ATTR_MEDIA_CONTENT_TYPE: media[ATTR_MEDIA_CONTENT_TYPE],
+                **(extra_data or {}),
             },
             context=play_context,
         ):
+            if native_loop:
+                self._failed_native_loop_context_ids.add(play_context.id)
             self._track_failed_play_context(
                 play_context.id, media[ATTR_MEDIA_CONTENT_ID]
             )
@@ -1628,6 +1979,15 @@ class NurserySootherController:
                 self._owned_play_context_id = play_context.id
                 self._owned_media_content_id = current_content_id
                 await self._async_stop_playback()
+            elif (
+                native_loop
+                and media_state is not None
+                and media_state.state
+                in {MediaPlayerState.PLAYING, MediaPlayerState.BUFFERING}
+            ):
+                # Another source won the race after queue setup. Do not clear its
+                # queue or alter the repeat/crossfade settings it now owns.
+                self._relinquish_playback()
             self._playback_interrupted = True
             return False
         self._owns_playback = True
@@ -1647,6 +2007,82 @@ class NurserySootherController:
         ):
             self._adopt_owned_media_content_id(current_content_id)
         return True
+
+    def _sonos_crossfade_entity_id(self) -> str | None:
+        """Return the crossfade switch paired with a selected Sonos player."""
+        if self.media_player is None:
+            return None
+        registry = er.async_get(self.hass)
+        media_entry = registry.async_get(self.media_player)
+        if media_entry is None or media_entry.platform != SONOS_PLATFORM:
+            return None
+        return registry.async_get_entity_id(
+            Platform.SWITCH,
+            SONOS_PLATFORM,
+            f"{media_entry.unique_id}{SONOS_CROSSFADE_UNIQUE_ID_SUFFIX}",
+        )
+
+    def _native_crossfade_loop_supported(self, crossfade_entity_id: str) -> bool:
+        """Return whether the selected Sonos exposes every proven loop control."""
+        media_state = (
+            self.hass.states.get(self.media_player)
+            if self.media_player is not None
+            else None
+        )
+        crossfade_state = self.hass.states.get(crossfade_entity_id)
+        if (
+            media_state is None
+            or crossfade_state is None
+            or crossfade_state.state not in {STATE_OFF, STATE_ON}
+            or media_state.attributes.get(ATTR_MEDIA_REPEAT)
+            not in {mode.value for mode in RepeatMode}
+            or self._media_features() & _NATIVE_LOOP_MEDIA_PLAYER_FEATURES
+            != _NATIVE_LOOP_MEDIA_PLAYER_FEATURES
+        ):
+            return False
+        return all(
+            self.hass.services.has_service(domain, service)
+            for domain, service in (
+                (MEDIA_PLAYER_DOMAIN, SERVICE_CLEAR_PLAYLIST),
+                (MEDIA_PLAYER_DOMAIN, SERVICE_REPEAT_SET),
+                (Platform.SWITCH, SERVICE_TURN_ON),
+                (Platform.SWITCH, SERVICE_TURN_OFF),
+            )
+        )
+
+    def _capture_native_loop_settings(
+        self, crossfade_entity_id: str
+    ) -> _NativeLoopSettings | None:
+        """Capture only settings that Nursery Soother will temporarily force."""
+        media_state = (
+            self.hass.states.get(self.media_player)
+            if self.media_player is not None
+            else None
+        )
+        crossfade_state = self.hass.states.get(crossfade_entity_id)
+        if media_state is None or crossfade_state is None:
+            return None
+        previous_repeat = media_state.attributes.get(ATTR_MEDIA_REPEAT)
+        if not isinstance(previous_repeat, str) or crossfade_state.state not in {
+            STATE_OFF,
+            STATE_ON,
+        }:
+            return None
+        return _NativeLoopSettings(
+            crossfade_entity_id=crossfade_entity_id,
+            previous_repeat=previous_repeat,
+            previous_crossfade=crossfade_state.state,
+            group_members=self._media_group_members(media_state),
+        )
+
+    def _media_group_members(self, media_state: State) -> tuple[str, ...]:
+        """Return stable group topology for conservative setting restoration."""
+        members = media_state.attributes.get(ATTR_GROUP_MEMBERS)
+        if isinstance(members, list) and all(
+            isinstance(member, str) for member in members
+        ):
+            return tuple(members)
+        return (self.media_player,) if self.media_player is not None else ()
 
     async def _async_set_speaker_volume(
         self,
@@ -1670,14 +2106,23 @@ class NurserySootherController:
             {ATTR_MEDIA_VOLUME_LEVEL: safe_percent / 100.0},
         )
 
-    async def _async_playback_is_owned_now(
+    async def _async_playback_is_owned_now(  # noqa: PLR0911
         self, *, notify_interruption: bool = True
     ) -> bool:
         """Reconcile live speaker state immediately before a volume effect."""
         if not self._owns_playback or self.media_player is None:
             return False
         media_state = self.hass.states.get(self.media_player)
-        if media_state is None or media_state.state not in {
+        if media_state is None:
+            return False
+        if media_state.state in {
+            MediaPlayerState.IDLE,
+            MediaPlayerState.OFF,
+            MediaPlayerState.PAUSED,
+        }:
+            self._clear_playback_ownership()
+            return False
+        if media_state.state not in {
             MediaPlayerState.PLAYING,
             MediaPlayerState.BUFFERING,
         }:
@@ -1740,10 +2185,14 @@ class NurserySootherController:
                 current_content_id, failed_media_content_id
             )
         ):
+            failed_native_loop = failed_context_id in (
+                self._failed_native_loop_context_ids
+            )
             self._clear_failed_play_context(failed_context_id)
             self._owns_playback = True
             self._owned_play_context_id = failed_context_id
             self._owned_media_content_id = current_content_id
+            self._native_loop_active = failed_native_loop
             if not await self._async_stop_playback():
                 self._transition(
                     SootherState.ATTENTION_REQUIRED,
@@ -1772,6 +2221,7 @@ class NurserySootherController:
                 self._failed_play_expiries.pop(context_id, None)
                 self._failed_play_context_ids.discard(context_id)
                 self._failed_play_media_content_ids.pop(context_id, None)
+                self._failed_native_loop_context_ids.discard(context_id)
                 self._emit_update()
 
         cancel_callback = async_call_later(
@@ -1783,6 +2233,7 @@ class NurserySootherController:
         """Finish monitoring one failed play context."""
         self._failed_play_context_ids.discard(context_id)
         self._failed_play_media_content_ids.pop(context_id, None)
+        self._failed_native_loop_context_ids.discard(context_id)
         if cancel_callback := self._failed_play_expiries.pop(context_id, None):
             cancel_callback()
 
@@ -1806,9 +2257,32 @@ class NurserySootherController:
         else:
             self._action_generation += 1
 
-    async def _async_stop_playback(self) -> bool:
-        """Stop or pause only playback started by this controller."""
+    async def _async_stop_playback(  # noqa: C901, PLR0911
+        self, *, preserve_native_loop_session: bool = False
+    ) -> bool:
+        """Stop only owned playback and clean up its temporary Sonos loop."""
+        native_loop_present = (
+            self._native_loop_active or self._native_loop_settings is not None
+        )
         if not self._owns_playback:
+            if native_loop_present and not preserve_native_loop_session:
+                media_state = (
+                    self.hass.states.get(self.media_player)
+                    if self.media_player is not None
+                    else None
+                )
+                return await self._async_cleanup_native_loop(
+                    clear_queue=(
+                        media_state is not None
+                        and media_state.state
+                        in {
+                            MediaPlayerState.IDLE,
+                            MediaPlayerState.OFF,
+                            MediaPlayerState.PAUSED,
+                        }
+                    ),
+                    end_session=True,
+                )
             return True
         media_player = self.media_player
         if media_player is None or not self._entity_available(media_player):
@@ -1817,6 +2291,13 @@ class NurserySootherController:
         if media_state is None:
             return False
         if not self._current_playback_should_be_stopped(media_state):
+            if self._playback_interrupted:
+                return True
+            if native_loop_present:
+                return await self._async_cleanup_native_loop(
+                    clear_queue=True,
+                    end_session=not preserve_native_loop_session,
+                )
             return True
         features = self._media_features()
         stopped = False
@@ -1830,7 +2311,86 @@ class NurserySootherController:
             )
         if stopped:
             self._clear_playback_ownership()
+            if native_loop_present:
+                cleaned = await self._async_cleanup_native_loop(
+                    clear_queue=True,
+                    end_session=not preserve_native_loop_session,
+                )
+                if not cleaned and preserve_native_loop_session:
+                    await self._async_cleanup_native_loop(
+                        clear_queue=False, end_session=True
+                    )
+                return cleaned
         return stopped
+
+    async def _async_cleanup_native_loop(
+        self, *, clear_queue: bool, end_session: bool
+    ) -> bool:
+        """Clear an owned Sonos queue and optionally restore prior settings."""
+        success = True
+        if clear_queue and self._native_loop_active:
+            queue_cleared = await self._async_call_media(
+                SERVICE_CLEAR_PLAYLIST, {}, critical=False
+            )
+            success = queue_cleared
+            if queue_cleared:
+                self._native_loop_active = False
+
+        if end_session and self._native_loop_settings is not None:
+            restored = await self._async_restore_native_loop_settings(
+                self._native_loop_settings,
+                force=self._native_loop_force_restore,
+            )
+            success = restored and success
+            if restored:
+                self._native_loop_settings = None
+                self._native_loop_force_restore = False
+        if end_session and success:
+            self._native_loop_active = False
+            self._native_loop_force_restore = False
+        return success
+
+    async def _async_restore_native_loop_settings(
+        self, settings: _NativeLoopSettings, *, force: bool = False
+    ) -> bool:
+        """Restore settings only while the same Sonos group still has our values."""
+        media_state = (
+            self.hass.states.get(self.media_player)
+            if self.media_player is not None
+            else None
+        )
+        crossfade_state = self.hass.states.get(settings.crossfade_entity_id)
+        if media_state is None or crossfade_state is None:
+            return False
+        if self._media_group_members(media_state) != settings.group_members:
+            _LOGGER.info(
+                "Nursery Sonos group changed; leaving repeat and crossfade untouched"
+            )
+            return True
+
+        success = True
+        if (
+            media_state.attributes.get(ATTR_MEDIA_REPEAT) == RepeatMode.ALL or force
+        ) and settings.previous_repeat != RepeatMode.ALL:
+            success = await self._async_call_media(
+                SERVICE_REPEAT_SET,
+                {ATTR_MEDIA_REPEAT: settings.previous_repeat},
+                critical=False,
+            ) and await self._async_wait_for_media_repeat(settings.previous_repeat)
+        if (
+            crossfade_state.state == STATE_ON or force
+        ) and settings.previous_crossfade == STATE_OFF:
+            crossfade_restored = await self._async_call_entity(
+                Platform.SWITCH,
+                SERVICE_TURN_OFF,
+                settings.crossfade_entity_id,
+                {},
+                critical=False,
+            ) and await self._async_wait_for_entity_state(
+                settings.crossfade_entity_id, STATE_OFF
+            )
+            success = crossfade_restored and success
+        return success
 
     def _current_playback_should_be_stopped(self, media_state: State) -> bool:
         """Reconcile live ownership and return whether Stop is safe."""
@@ -2078,6 +2638,11 @@ class NurserySootherController:
     def _relinquish_playback(self) -> None:
         """Forget playback once another source has definitely taken over."""
         self._clear_playback_ownership()
+        # Never alter repeat, crossfade, or queue state after another source takes
+        # ownership. A parent takeover is more important than restoring our snapshot.
+        self._native_loop_active = False
+        self._native_loop_settings = None
+        self._native_loop_force_restore = False
         self._playback_interrupted = True
 
     async def _async_call_media(
@@ -2091,13 +2656,33 @@ class NurserySootherController:
         """Call the selected media player and convert failures to safe state."""
         if self.media_player is None:
             return False
+        return await self._async_call_entity(
+            MEDIA_PLAYER_DOMAIN,
+            service,
+            self.media_player,
+            data,
+            critical=critical,
+            context=context,
+        )
+
+    async def _async_call_entity(  # noqa: PLR0913
+        self,
+        domain: str,
+        service: str,
+        entity_id: str,
+        data: dict[str, Any],
+        *,
+        critical: bool = True,
+        context: Context | None = None,
+    ) -> bool:
+        """Call one output entity and convert integration failures to safe state."""
         call_context = context or Context()
         try:
             async with asyncio.timeout(SERVICE_CALL_TIMEOUT):
                 await self.hass.services.async_call(
-                    MEDIA_PLAYER_DOMAIN,
+                    domain,
                     service,
-                    {ATTR_ENTITY_ID: self.media_player, **data},
+                    {ATTR_ENTITY_ID: entity_id, **data},
                     blocking=True,
                     context=call_context,
                 )
@@ -2106,7 +2691,8 @@ class NurserySootherController:
         except Exception as err:  # noqa: BLE001
             self._last_error = type(err).__name__
             _LOGGER.warning(
-                "Nursery speaker %s action failed (%s)",
+                "Nursery output %s.%s action failed (%s)",
+                domain,
                 service,
                 type(err).__name__,
             )

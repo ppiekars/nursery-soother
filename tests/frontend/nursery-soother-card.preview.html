@@ -1,0 +1,226 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Nursery Soother card preview</title>
+    <style>
+      :root {
+        --primary-color: #03a9f4;
+        --primary-text-color: rgba(0, 0, 0, 0.87);
+        --secondary-text-color: rgba(0, 0, 0, 0.62);
+        --disabled-text-color: rgba(0, 0, 0, 0.28);
+        --divider-color: rgba(0, 0, 0, 0.12);
+        --card-background-color: #ffffff;
+        --secondary-background-color: #e7eaee;
+        --error-color: #e53935;
+        --warning-color: #a66b00;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        min-height: 100vh;
+        margin: 0;
+        padding: 32px 20px;
+        color: var(--primary-text-color);
+        background: #f4f5f7;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      }
+
+      body.dark {
+        --primary-text-color: rgba(255, 255, 255, 0.95);
+        --secondary-text-color: rgba(255, 255, 255, 0.66);
+        --disabled-text-color: rgba(255, 255, 255, 0.3);
+        --divider-color: rgba(255, 255, 255, 0.15);
+        --card-background-color: #1c1f26;
+        --secondary-background-color: #11151b;
+        --warning-color: #ffbd42;
+        background: #111318;
+      }
+
+      main {
+        width: min(100%, 340px);
+        margin: 0 auto;
+      }
+
+      ha-card {
+        box-shadow: 0 2px 8px rgba(0, 0, 0, 0.18);
+      }
+
+      .preview-controls {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        margin-top: 20px;
+      }
+
+      .preview-controls button {
+        padding: 7px 10px;
+      }
+
+      #log {
+        min-height: 48px;
+        overflow-wrap: anywhere;
+        font-size: 11px;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <div id="card-host"></div>
+      <div class="preview-controls" aria-label="Preview states">
+        <button type="button" data-testid="attention-demo">Attention</button>
+        <button type="button" data-testid="recommendation-demo">Suggestion</button>
+        <button type="button" data-testid="theme-demo">Theme</button>
+      </div>
+      <pre id="log" aria-live="polite"></pre>
+    </main>
+
+    <script type="module">
+      const cameraSvg = `
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 500">
+          <defs>
+            <linearGradient id="wall" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0" stop-color="#a9c3cd"/>
+              <stop offset="1" stop-color="#647a82"/>
+            </linearGradient>
+            <linearGradient id="blanket" x1="0" y1="0" x2="1" y2="1">
+              <stop offset="0" stop-color="#e8c7a7"/>
+              <stop offset="1" stop-color="#bd8c72"/>
+            </linearGradient>
+          </defs>
+          <rect width="800" height="500" fill="url(#wall)"/>
+          <circle cx="650" cy="105" r="58" fill="#f2dfb2" opacity=".8"/>
+          <rect y="380" width="800" height="120" fill="#46575b"/>
+          <rect x="105" y="205" width="585" height="205" rx="22" fill="#493c36"/>
+          <rect x="132" y="234" width="531" height="128" rx="18" fill="url(#blanket)"/>
+          <path d="M155 322c90-78 184 44 275-26 88-66 151 11 210 44v22H155z" fill="#dcb596"/>
+          <g fill="#332b28">
+            <rect x="128" y="181" width="22" height="244" rx="9"/>
+            <rect x="645" y="181" width="22" height="244" rx="9"/>
+            <rect x="128" y="181" width="539" height="18" rx="8"/>
+          </g>
+          <circle cx="392" cy="286" r="29" fill="#b67b60"/>
+          <path d="M348 332c23-48 73-48 92 0" fill="#8b6f82"/>
+        </svg>
+      `;
+      const picture = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(cameraSvg)}`;
+
+      const ids = {
+        camera: "camera.nursery",
+        level: "select.nursery_soother_level",
+        automatic: "switch.nursery_soother_automatic_operation",
+        lock: "switch.nursery_soother_level_lock",
+        state: "sensor.nursery_soother_state",
+        recommendation: "sensor.nursery_soother_recommendation",
+        attention: "binary_sensor.nursery_soother_attention_required",
+      };
+
+      let states = {
+        [ids.camera]: {
+          entity_id: ids.camera,
+          state: "idle",
+          attributes: { friendly_name: "Nursery camera", entity_picture: picture },
+        },
+        [ids.level]: { entity_id: ids.level, state: "level_1", attributes: {} },
+        [ids.automatic]: { entity_id: ids.automatic, state: "off", attributes: {} },
+        [ids.lock]: { entity_id: ids.lock, state: "off", attributes: {} },
+        [ids.state]: { entity_id: ids.state, state: "cry_pending", attributes: {} },
+        [ids.recommendation]: {
+          entity_id: ids.recommendation,
+          state: "increase_level",
+          attributes: { suggested_level: "level_2" },
+        },
+        [ids.attention]: { entity_id: ids.attention, state: "off", attributes: {} },
+      };
+
+      const log = document.querySelector("#log");
+      let card;
+
+      function hass() {
+        return {
+          states,
+          hassUrl: (path) => path,
+          callService: async (domain, service, data) => {
+            log.textContent = JSON.stringify({ domain, service, data }, null, 2);
+            states = { ...states };
+            if (domain === "select") {
+              states[ids.level] = { ...states[ids.level], state: data.option };
+              states[ids.state] = { ...states[ids.state], state: "soothing" };
+              states[ids.recommendation] = {
+                ...states[ids.recommendation],
+                state: "none",
+                attributes: { suggested_level: null },
+              };
+            } else if (domain === "switch") {
+              states[data.entity_id] = {
+                ...states[data.entity_id],
+                state: service === "turn_on" ? "on" : "off",
+              };
+            }
+            card.hass = hass();
+          },
+        };
+      }
+
+      await import(
+        "../../custom_components/nursery_soother/frontend/nursery-soother-card.js"
+      );
+      await customElements.whenDefined("nursery-soother-card");
+
+      card = document.createElement("nursery-soother-card");
+      card.setConfig({
+        camera_entity: ids.camera,
+        level_entity: ids.level,
+        automatic_entity: ids.automatic,
+        lock_entity: ids.lock,
+        state_entity: ids.state,
+        recommendation_entity: ids.recommendation,
+        attention_entity: ids.attention,
+        camera_view: "image",
+      });
+      card.hass = hass();
+      card.addEventListener("hass-more-info", (event) => {
+        log.textContent = `More info: ${event.detail.entityId}`;
+      });
+      document.querySelector("#card-host").append(card);
+
+      document.querySelector("[data-testid='attention-demo']").addEventListener("click", () => {
+        states = {
+          ...states,
+          [ids.level]: { ...states[ids.level], state: "level_2" },
+          [ids.state]: { ...states[ids.state], state: "attention_required" },
+          [ids.recommendation]: {
+            ...states[ids.recommendation],
+            state: "attend",
+            attributes: { suggested_level: null },
+          },
+          [ids.attention]: { ...states[ids.attention], state: "on" },
+        };
+        card.hass = hass();
+      });
+
+      document.querySelector("[data-testid='recommendation-demo']").addEventListener("click", () => {
+        states = {
+          ...states,
+          [ids.level]: { ...states[ids.level], state: "level_1" },
+          [ids.state]: { ...states[ids.state], state: "cry_pending" },
+          [ids.recommendation]: {
+            ...states[ids.recommendation],
+            state: "increase_level",
+            attributes: { suggested_level: "level_2" },
+          },
+          [ids.attention]: { ...states[ids.attention], state: "off" },
+        };
+        card.hass = hass();
+      });
+
+      document.querySelector("[data-testid='theme-demo']").addEventListener("click", () => {
+        document.body.classList.toggle("dark");
+      });
+    </script>
+  </body>
+</html>

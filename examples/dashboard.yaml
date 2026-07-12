@@ -1,38 +1,31 @@
 # Example manual Lovelace view for Nursery Soother.
 #
+# When Home Assistant's frontend is available, the optional custom card is
+# served and loaded by the integration; no manual dashboard resource is needed.
 # Entity IDs are assigned by Home Assistant and can be renamed. Before pasting
 # this view into a dashboard, replace every sample `nursery_soother_*` ID with
-# the entity shown on the Nursery Soother device page. Also replace
-# `camera.nursery` with the camera selected during setup.
+# the entity shown on the Nursery Soother device page and replace
+# `camera.nursery` with the configured camera. Update this YAML again after
+# renaming any referenced entity.
 
 title: Nursery
 path: nursery
 icon: mdi:baby-face-outline
 cards:
-  - type: picture-entity
-    entity: camera.nursery
-    name: Nursery camera
+  - type: custom:nursery-soother-card
+    camera_entity: camera.nursery
+    level_entity: select.nursery_soother_level
+    automatic_entity: switch.nursery_soother_automatic_operation
+    lock_entity: switch.nursery_soother_level_lock
+    state_entity: sensor.nursery_soother_state
+    recommendation_entity: sensor.nursery_soother_recommendation
+    attention_entity: binary_sensor.nursery_soother_attention_required
     camera_view: live
-    show_name: true
-    show_state: false
 
   - type: entities
-    title: Nursery Soother
+    title: Testing, level volumes, and hard cap
     show_header_toggle: false
-    state_color: true
     entities:
-      - entity: select.nursery_soother_level
-        name: Soothing level
-      - entity: switch.nursery_soother_automatic_operation
-        name: Automatic operation
-      - entity: switch.nursery_soother_level_lock
-        name: Level lock
-      - entity: sensor.nursery_soother_state
-        name: State
-      - entity: sensor.nursery_soother_recommendation
-        name: Recommendation
-      - entity: binary_sensor.nursery_soother_attention_required
-        name: Attention required
       - entity: button.nursery_soother_simulate_cry_event
         name: Simulate cry event
         tap_action:
@@ -42,11 +35,6 @@ cards:
             entity_id: button.nursery_soother_simulate_cry_event
           confirmation:
             text: Inject one test cry event that can notify parents or change the automatic level?
-
-  - type: entities
-    title: Level volumes and hard cap
-    show_header_toggle: false
-    entities:
       - entity: number.nursery_soother_baseline_volume
         name: Baseline
       - entity: number.nursery_soother_level_1_volume
@@ -59,3 +47,31 @@ cards:
         name: Level 4
       - entity: number.nursery_soother_maximum_volume
         name: Maximum
+
+# Native-card fallback: if you do not want to use the optional custom card,
+# remove it above and uncomment this picture-entity card plus the entities card.
+#
+#   - type: picture-entity
+#     entity: camera.nursery
+#     name: Nursery camera
+#     camera_view: live
+#     show_name: true
+#     show_state: false
+#
+#   - type: entities
+#     title: Nursery Soother controls
+#     show_header_toggle: false
+#     state_color: true
+#     entities:
+#       - entity: select.nursery_soother_level
+#         name: Soothing level
+#       - entity: switch.nursery_soother_automatic_operation
+#         name: Automatic operation
+#       - entity: switch.nursery_soother_level_lock
+#         name: Level lock
+#       - entity: sensor.nursery_soother_state
+#         name: State
+#       - entity: sensor.nursery_soother_recommendation
+#         name: Recommendation
+#       - entity: binary_sensor.nursery_soother_attention_required
+#         name: Attention required

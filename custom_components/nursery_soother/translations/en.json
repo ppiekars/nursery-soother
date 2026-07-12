@@ -215,9 +215,6 @@
     "invalid_volume": {
       "message": "Volumes must increase monotonically from Baseline through Level 4 and remain at or below Maximum."
     },
-    "invalid_level": {
-      "message": "Select Standby, Baseline, or Level 1 through Level 4."
-    },
     "standby": {
       "message": "Nursery Soother is in Standby. Select an active level first."
     },
@@ -229,6 +226,9 @@
     },
     "playback_settling": {
       "message": "Home Assistant is still waiting for a previous speaker command to settle. Try selecting an active level again in a few seconds."
+    },
+    "level_change_failed": {
+      "message": "The nursery speaker could not apply the selected soothing level. Check the speaker and try again."
     }
   }
 }

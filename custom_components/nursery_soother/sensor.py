@@ -54,14 +54,6 @@ class NurserySootherSensor(NurserySootherEntity, SensorEntity):
 
     entity_description: SensorEntityDescription
 
-    def __init__(
-        self,
-        entry: ConfigEntry[NurserySootherController],
-        description: SensorEntityDescription,
-    ) -> None:
-        """Initialize a Nursery Soother sensor."""
-        super().__init__(entry, description)
-
     @property
     def native_value(self) -> str:
         """Return the controller value represented by this sensor."""

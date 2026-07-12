@@ -2,14 +2,19 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from datetime import timedelta
 from typing import TYPE_CHECKING
 
 import pytest
+from homeassistant.components.media_player import MediaPlayerEnqueue, RepeatMode
 from homeassistant.components.media_player.const import (
     ATTR_MEDIA_CONTENT_ID,
+    ATTR_MEDIA_ENQUEUE,
+    ATTR_MEDIA_REPEAT,
     ATTR_MEDIA_VOLUME_LEVEL,
+    SERVICE_CLEAR_PLAYLIST,
     SERVICE_PLAY_MEDIA,
     MediaPlayerEntityFeature,
 )
@@ -18,17 +23,24 @@ from homeassistant.const import (
     ATTR_SUPPORTED_FEATURES,
     SERVICE_MEDIA_PAUSE,
     SERVICE_MEDIA_STOP,
+    SERVICE_REPEAT_SET,
+    SERVICE_TURN_OFF,
+    SERVICE_TURN_ON,
     SERVICE_VOLUME_SET,
+    STATE_OFF,
+    STATE_ON,
     STATE_UNAVAILABLE,
 )
 from homeassistant.core import Context, ServiceCall, callback
 from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
+from homeassistant.helpers import entity_registry as er
 from homeassistant.util import dt as dt_util
 from pytest_homeassistant_custom_component.common import (
     MockConfigEntry,
     async_fire_time_changed,
 )
 
+import custom_components.nursery_soother.controller as controller_module
 from custom_components.nursery_soother.const import (
     CONF_AUTOMATIC_OPERATION,
     CONF_BASELINE_VOLUME,
@@ -70,6 +82,8 @@ MEDIA_PLAYER = "media_player.nursery"
 PARENT_ONE = "notify.parent_one"
 PARENT_TWO = "notify.parent_two"
 PARENT_COUNT = 2
+RECOVERY_CALL_COUNT = 2
+TRACK_CHANGE_CLEAR_COUNT = 3
 
 BASELINE_PERCENT = 10.0
 LEVEL_1_PERCENT = 15.0
@@ -108,6 +122,14 @@ SPEAKER_FEATURES = (
     | MediaPlayerEntityFeature.VOLUME_SET
     | MediaPlayerEntityFeature.STOP
 )
+SONOS_SPEAKER_FEATURES = (
+    SPEAKER_FEATURES
+    | MediaPlayerEntityFeature.CLEAR_PLAYLIST
+    | MediaPlayerEntityFeature.MEDIA_ENQUEUE
+    | MediaPlayerEntityFeature.REPEAT_SET
+)
+SONOS_UNIQUE_ID = "RINCON_TEST"
+SONOS_CROSSFADE = "switch.nursery_crossfade"
 SONOS_NURSERY_URL = "http://192.0.2.1:8123/media/local/white-noise.mp3?authSig=first"
 SONOS_REFRESHED_NURSERY_URL = (
     "http://192.0.2.1:8123/media/local/white-noise.mp3?authSig=refreshed"
@@ -122,6 +144,18 @@ class RecordedCalls:
 
     media: list[ServiceCall] = field(default_factory=list)
     notifications: list[ServiceCall] = field(default_factory=list)
+    switches: list[ServiceCall] = field(default_factory=list)
+    effects: list[tuple[str, str]] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class SonosTestBehavior:
+    """Optional delayed-state and takeover behavior for the Sonos test double."""
+
+    confirm_crossfade: bool = True
+    confirm_repeat: bool = True
+    takeover_on_crossfade: bool = False
+    takeover_on_play: bool = False
 
 
 @pytest.fixture(autouse=True)
@@ -188,6 +222,145 @@ async def started_controller(
     controller = NurserySootherController(hass, entry)
     await controller.async_start()
     await hass.async_block_till_done()
+    yield controller, calls
+    await controller.async_shutdown()
+
+
+async def _start_sonos_controller(  # noqa: C901, PLR0915
+    hass: HomeAssistant,
+    *,
+    initial_repeat: str = RepeatMode.OFF,
+    initial_crossfade: str = STATE_OFF,
+    behavior: SonosTestBehavior | None = None,
+) -> tuple[NurserySootherController, RecordedCalls]:
+    """Start a controller against a registry-paired Sonos test double."""
+    behavior = behavior or SonosTestBehavior()
+    calls = RecordedCalls()
+    registry = er.async_get(hass)
+    media_entry = registry.async_get_or_create(
+        domain="media_player",
+        platform="sonos",
+        unique_id=SONOS_UNIQUE_ID,
+        suggested_object_id="nursery",
+    )
+    crossfade_entry = registry.async_get_or_create(
+        domain="switch",
+        platform="sonos",
+        unique_id=f"{SONOS_UNIQUE_ID}-cross_fade",
+        suggested_object_id="nursery_crossfade",
+    )
+    assert media_entry.entity_id == MEDIA_PLAYER
+    assert crossfade_entry.entity_id == SONOS_CROSSFADE
+
+    @callback
+    def _record_media(call: ServiceCall) -> None:
+        calls.media.append(call)
+        calls.effects.append(("media_player", call.service))
+        current_state = hass.states.get(MEDIA_PLAYER)
+        assert current_state is not None
+        attributes = dict(current_state.attributes)
+        state = current_state.state
+        context = call.context
+        if call.service == SERVICE_PLAY_MEDIA:
+            if behavior.takeover_on_play:
+                attributes[ATTR_MEDIA_CONTENT_ID] = "resolved://parent-race"
+                context = Context(user_id="parent-user")
+            else:
+                attributes[ATTR_MEDIA_CONTENT_ID] = call.data[ATTR_MEDIA_CONTENT_ID]
+            state = "playing"
+        elif call.service == SERVICE_REPEAT_SET:
+            if (
+                not behavior.confirm_repeat
+                and call.data[ATTR_MEDIA_REPEAT] == RepeatMode.ALL
+            ):
+                return
+            attributes[ATTR_MEDIA_REPEAT] = call.data[ATTR_MEDIA_REPEAT]
+        elif call.service == SERVICE_MEDIA_STOP:
+            state = "idle"
+        elif call.service == SERVICE_MEDIA_PAUSE:
+            state = "paused"
+        else:
+            return
+        hass.states.async_set(
+            MEDIA_PLAYER,
+            state,
+            attributes,
+            context=context,
+        )
+
+    @callback
+    def _record_switch(call: ServiceCall) -> None:
+        calls.switches.append(call)
+        calls.effects.append(("switch", call.service))
+        if call.service == SERVICE_TURN_ON and not behavior.confirm_crossfade:
+            return
+        hass.states.async_set(
+            SONOS_CROSSFADE,
+            STATE_ON if call.service == SERVICE_TURN_ON else STATE_OFF,
+            context=call.context,
+        )
+        if call.service == SERVICE_TURN_ON and behavior.takeover_on_crossfade:
+            current_state = hass.states.get(MEDIA_PLAYER)
+            assert current_state is not None
+            attributes = dict(current_state.attributes)
+            attributes[ATTR_MEDIA_CONTENT_ID] = "resolved://parent-race"
+            hass.states.async_set(
+                MEDIA_PLAYER,
+                "playing",
+                attributes,
+                context=Context(user_id="parent-user"),
+            )
+
+    @callback
+    def _record_notification(call: ServiceCall) -> None:
+        calls.notifications.append(call)
+
+    for service in (
+        SERVICE_VOLUME_SET,
+        SERVICE_PLAY_MEDIA,
+        SERVICE_MEDIA_STOP,
+        SERVICE_MEDIA_PAUSE,
+        SERVICE_CLEAR_PLAYLIST,
+        SERVICE_REPEAT_SET,
+    ):
+        hass.services.async_register("media_player", service, _record_media)
+    for service in (SERVICE_TURN_ON, SERVICE_TURN_OFF):
+        hass.services.async_register("switch", service, _record_switch)
+    hass.services.async_register("notify", "parent_one", _record_notification)
+    hass.services.async_register("notify", "parent_two", _record_notification)
+
+    hass.states.async_set(CRY_SENSOR, "off")
+    hass.states.async_set(CAMERA, "idle")
+    hass.states.async_set(
+        MEDIA_PLAYER,
+        "idle",
+        {
+            ATTR_SUPPORTED_FEATURES: int(SONOS_SPEAKER_FEATURES),
+            ATTR_MEDIA_REPEAT: initial_repeat,
+        },
+    )
+    hass.states.async_set(SONOS_CROSSFADE, initial_crossfade)
+
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        title=NAME,
+        data=CONFIG_DATA,
+        options=FAST_OPTIONS,
+        version=ENTRY_VERSION,
+    )
+    entry.add_to_hass(hass)
+    controller = NurserySootherController(hass, entry)
+    await controller.async_start()
+    await hass.async_block_till_done()
+    return controller, calls
+
+
+@pytest.fixture
+async def started_sonos_controller(
+    hass: HomeAssistant,
+) -> AsyncGenerator[tuple[NurserySootherController, RecordedCalls]]:
+    """Create an active native-loop Sonos controller."""
+    controller, calls = await _start_sonos_controller(hass)
     yield controller, calls
     await controller.async_shutdown()
 
@@ -309,6 +482,306 @@ async def test_start_recovers_configured_baseline_and_shared_sound(
     assert (
         play_call.data[ATTR_MEDIA_CONTENT_ID] == SOOTHING_MEDIA[ATTR_MEDIA_CONTENT_ID]
     )
+
+
+async def test_generic_player_uses_direct_playback_fallback(
+    started_controller: tuple[NurserySootherController, RecordedCalls],
+) -> None:
+    """A non-Sonos player keeps the established direct-play behavior."""
+    controller, calls = started_controller
+
+    play_calls = _media_calls(calls, SERVICE_PLAY_MEDIA)
+
+    assert len(play_calls) == 1
+    assert ATTR_MEDIA_ENQUEUE not in play_calls[0].data
+    assert not _media_calls(calls, SERVICE_CLEAR_PLAYLIST)
+    assert not _media_calls(calls, SERVICE_REPEAT_SET)
+    assert controller.diagnostics["native_crossfade_loop_active"] is False
+
+
+async def test_sonos_registry_pair_starts_one_item_crossfade_loop(
+    hass: HomeAssistant,
+    started_sonos_controller: tuple[NurserySootherController, RecordedCalls],
+) -> None:
+    """A paired Sonos switch enables the proven one-item native loop."""
+    controller, calls = started_sonos_controller
+    registry = er.async_get(hass)
+
+    assert (
+        registry.async_get_entity_id("switch", "sonos", f"{SONOS_UNIQUE_ID}-cross_fade")
+        == SONOS_CROSSFADE
+    )
+    assert calls.effects == [
+        ("media_player", SERVICE_VOLUME_SET),
+        ("switch", SERVICE_TURN_ON),
+        ("media_player", SERVICE_CLEAR_PLAYLIST),
+        ("media_player", SERVICE_PLAY_MEDIA),
+        ("media_player", SERVICE_REPEAT_SET),
+    ]
+    play_calls = _media_calls(calls, SERVICE_PLAY_MEDIA)
+    assert len(play_calls) == 1
+    assert play_calls[0].data[ATTR_MEDIA_ENQUEUE] == MediaPlayerEnqueue.PLAY
+    assert (
+        _media_calls(calls, SERVICE_REPEAT_SET)[0].data[ATTR_MEDIA_REPEAT]
+        == RepeatMode.ALL
+    )
+    assert [call.service for call in calls.switches] == [SERVICE_TURN_ON]
+    assert hass.states.get(MEDIA_PLAYER).attributes[ATTR_MEDIA_REPEAT] == RepeatMode.ALL
+    assert hass.states.get(SONOS_CROSSFADE).state == STATE_ON
+    assert controller.diagnostics["native_crossfade_loop_active"] is True
+
+
+async def test_sonos_owned_idle_rebuilds_one_item_without_periodic_refill(
+    hass: HomeAssistant,
+    started_sonos_controller: tuple[NurserySootherController, RecordedCalls],
+) -> None:
+    """Only an unexpected owned idle state rebuilds the persistent Sonos queue."""
+    controller, calls = started_sonos_controller
+    current_state = hass.states.get(MEDIA_PLAYER)
+    assert current_state is not None
+
+    hass.states.async_set(
+        MEDIA_PLAYER,
+        "idle",
+        dict(current_state.attributes),
+    )
+    await hass.async_block_till_done()
+
+    play_calls = _media_calls(calls, SERVICE_PLAY_MEDIA)
+    assert len(play_calls) == RECOVERY_CALL_COUNT
+    assert all(
+        call.data[ATTR_MEDIA_ENQUEUE] == MediaPlayerEnqueue.PLAY for call in play_calls
+    )
+    assert len(_media_calls(calls, SERVICE_CLEAR_PLAYLIST)) == RECOVERY_CALL_COUNT
+    assert len(_media_calls(calls, SERVICE_REPEAT_SET)) == RECOVERY_CALL_COUNT
+    assert [call.service for call in calls.switches] == [SERVICE_TURN_ON]
+    assert controller.diagnostics["native_crossfade_loop_active"] is True
+
+
+async def test_sonos_idle_rebuild_failure_enters_attention_not_soothing(
+    hass: HomeAssistant,
+    started_sonos_controller: tuple[NurserySootherController, RecordedCalls],
+) -> None:
+    """A lost loop capability cannot leave a silent session visibly healthy."""
+    controller, calls = started_sonos_controller
+    play_count = len(_media_calls(calls, SERVICE_PLAY_MEDIA))
+    current_state = hass.states.get(MEDIA_PLAYER)
+    assert current_state is not None
+    hass.services.async_remove("media_player", SERVICE_REPEAT_SET)
+
+    hass.states.async_set(MEDIA_PLAYER, "idle", dict(current_state.attributes))
+    await hass.async_block_till_done()
+
+    assert len(_media_calls(calls, SERVICE_PLAY_MEDIA)) == play_count
+    assert controller.state is SootherState.ATTENTION_REQUIRED
+    assert controller.recommendation is Recommendation.CHECK_DEVICES
+    assert controller.diagnostics["playback_owned"] is False
+
+    @callback
+    def _restore_repeat_service(call: ServiceCall) -> None:
+        calls.media.append(call)
+        media_state = hass.states.get(MEDIA_PLAYER)
+        assert media_state is not None
+        attributes = dict(media_state.attributes)
+        attributes[ATTR_MEDIA_REPEAT] = call.data[ATTR_MEDIA_REPEAT]
+        hass.states.async_set(MEDIA_PLAYER, media_state.state, attributes)
+
+    hass.services.async_register(
+        "media_player", SERVICE_REPEAT_SET, _restore_repeat_service
+    )
+    assert await controller.async_shutdown()
+
+
+async def test_sonos_distinct_level_track_reuses_one_native_loop_session(
+    hass: HomeAssistant,
+    started_sonos_controller: tuple[NurserySootherController, RecordedCalls],
+) -> None:
+    """A per-level track change replaces one item without recapturing modes."""
+    controller, calls = started_sonos_controller
+    level_one_media = {
+        "media_content_id": "media-source://media_source/local/brown-noise.mp3",
+        "media_content_type": "audio/mpeg",
+    }
+    controller.sounds[SoothingLevel.LEVEL_1] = level_one_media
+
+    await controller.async_set_level(SoothingLevel.LEVEL_1)
+    await hass.async_block_till_done()
+
+    play_calls = _media_calls(calls, SERVICE_PLAY_MEDIA)
+    assert len(play_calls) == RECOVERY_CALL_COUNT
+    assert (
+        play_calls[-1].data[ATTR_MEDIA_CONTENT_ID]
+        == level_one_media[ATTR_MEDIA_CONTENT_ID]
+    )
+    assert play_calls[-1].data[ATTR_MEDIA_ENQUEUE] == MediaPlayerEnqueue.PLAY
+    assert len(_media_calls(calls, SERVICE_CLEAR_PLAYLIST)) == TRACK_CHANGE_CLEAR_COUNT
+    assert [call.service for call in calls.switches] == [SERVICE_TURN_ON]
+    assert [
+        call.data[ATTR_MEDIA_REPEAT] for call in _media_calls(calls, SERVICE_REPEAT_SET)
+    ] == [RepeatMode.ALL, RepeatMode.ALL]
+    assert controller.diagnostics["native_crossfade_loop_active"] is True
+
+
+async def test_sonos_standby_clears_queue_and_restores_settings(
+    hass: HomeAssistant,
+    started_sonos_controller: tuple[NurserySootherController, RecordedCalls],
+) -> None:
+    """Standby removes Nursery audio and restores the prior Sonos modes."""
+    controller, calls = started_sonos_controller
+    startup_effect_count = len(calls.effects)
+
+    await controller.async_set_level(SoothingLevel.STANDBY)
+    await hass.async_block_till_done()
+
+    assert calls.effects[startup_effect_count:] == [
+        ("media_player", SERVICE_MEDIA_STOP),
+        ("media_player", SERVICE_CLEAR_PLAYLIST),
+        ("media_player", SERVICE_REPEAT_SET),
+        ("switch", SERVICE_TURN_OFF),
+    ]
+    assert [
+        call.data[ATTR_MEDIA_REPEAT] for call in _media_calls(calls, SERVICE_REPEAT_SET)
+    ] == [RepeatMode.ALL, RepeatMode.OFF]
+    assert [call.service for call in calls.switches] == [
+        SERVICE_TURN_ON,
+        SERVICE_TURN_OFF,
+    ]
+    assert hass.states.get(MEDIA_PLAYER).attributes[ATTR_MEDIA_REPEAT] == RepeatMode.OFF
+    assert hass.states.get(SONOS_CROSSFADE).state == STATE_OFF
+    assert controller.diagnostics["native_crossfade_loop_active"] is False
+
+
+async def test_sonos_preserves_preexisting_repeat_all_and_crossfade(
+    hass: HomeAssistant,
+) -> None:
+    """Modes already enabled by a parent remain enabled after Standby."""
+    controller, calls = await _start_sonos_controller(
+        hass,
+        initial_repeat=RepeatMode.ALL,
+        initial_crossfade=STATE_ON,
+    )
+
+    await controller.async_set_level(SoothingLevel.STANDBY)
+    await hass.async_block_till_done()
+
+    assert [
+        call.data[ATTR_MEDIA_REPEAT] for call in _media_calls(calls, SERVICE_REPEAT_SET)
+    ] == [RepeatMode.ALL]
+    assert not calls.switches
+    assert hass.states.get(MEDIA_PLAYER).attributes[ATTR_MEDIA_REPEAT] == RepeatMode.ALL
+    assert hass.states.get(SONOS_CROSSFADE).state == STATE_ON
+    assert await controller.async_shutdown()
+
+
+async def test_sonos_requires_crossfade_state_confirmation(
+    hass: HomeAssistant,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A swallowed crossfade command cannot start a queue that may still gap."""
+    monkeypatch.setattr(controller_module, "NATIVE_LOOP_CONFIRMATION_SECONDS", 0)
+    controller, calls = await _start_sonos_controller(
+        hass,
+        behavior=SonosTestBehavior(confirm_crossfade=False),
+    )
+
+    assert controller.state is SootherState.ATTENTION_REQUIRED
+    assert not _media_calls(calls, SERVICE_PLAY_MEDIA)
+    assert not _media_calls(calls, SERVICE_CLEAR_PLAYLIST)
+    assert [call.service for call in calls.switches] == [
+        SERVICE_TURN_ON,
+        SERVICE_TURN_OFF,
+    ]
+    assert hass.states.get(SONOS_CROSSFADE).state == STATE_OFF
+    assert controller.diagnostics["native_crossfade_loop_active"] is False
+    assert await controller.async_shutdown()
+
+
+async def test_sonos_requires_repeat_all_state_confirmation(
+    hass: HomeAssistant,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unconfirmed repeat command is stopped and cleaned up immediately."""
+    monkeypatch.setattr(controller_module, "NATIVE_LOOP_CONFIRMATION_SECONDS", 0)
+    controller, calls = await _start_sonos_controller(
+        hass,
+        behavior=SonosTestBehavior(confirm_repeat=False),
+    )
+
+    assert controller.state is SootherState.ATTENTION_REQUIRED
+    assert len(_media_calls(calls, SERVICE_PLAY_MEDIA)) == 1
+    assert len(_media_calls(calls, SERVICE_MEDIA_STOP)) == 1
+    assert len(_media_calls(calls, SERVICE_CLEAR_PLAYLIST)) == RECOVERY_CALL_COUNT
+    assert [
+        call.data[ATTR_MEDIA_REPEAT] for call in _media_calls(calls, SERVICE_REPEAT_SET)
+    ] == [RepeatMode.ALL, RepeatMode.OFF]
+    assert [call.service for call in calls.switches] == [
+        SERVICE_TURN_ON,
+        SERVICE_TURN_OFF,
+    ]
+    assert hass.states.get(MEDIA_PLAYER).attributes[ATTR_MEDIA_REPEAT] == RepeatMode.OFF
+    assert hass.states.get(SONOS_CROSSFADE).state == STATE_OFF
+    assert controller.diagnostics["native_crossfade_loop_active"] is False
+    assert await controller.async_shutdown()
+
+
+@pytest.mark.parametrize(
+    ("behavior", "expected_clear_count", "expected_play_count"),
+    [
+        (SonosTestBehavior(takeover_on_crossfade=True), 0, 0),
+        (SonosTestBehavior(takeover_on_play=True), 1, 1),
+    ],
+    ids=("before-clear", "before-repeat"),
+)
+async def test_sonos_setup_takeover_never_mutates_parent_queue_or_repeat(
+    hass: HomeAssistant,
+    behavior: SonosTestBehavior,
+    expected_clear_count: int,
+    expected_play_count: int,
+) -> None:
+    """A parent winning either setup race becomes the untouched owner."""
+    controller, calls = await _start_sonos_controller(hass, behavior=behavior)
+
+    assert controller.level is SoothingLevel.STANDBY
+    assert controller.state is SootherState.ATTENTION_REQUIRED
+    assert controller.diagnostics["playback_owned"] is False
+    assert controller.diagnostics["native_crossfade_loop_active"] is False
+    assert len(_media_calls(calls, SERVICE_CLEAR_PLAYLIST)) == expected_clear_count
+    assert len(_media_calls(calls, SERVICE_PLAY_MEDIA)) == expected_play_count
+    assert not _media_calls(calls, SERVICE_REPEAT_SET)
+    assert hass.states.get(MEDIA_PLAYER).attributes[ATTR_MEDIA_CONTENT_ID] == (
+        "resolved://parent-race"
+    )
+    assert hass.states.get(SONOS_CROSSFADE).state == STATE_ON
+    assert await controller.async_shutdown()
+
+
+async def test_sonos_external_takeover_leaves_queue_and_modes_untouched(
+    hass: HomeAssistant,
+    started_sonos_controller: tuple[NurserySootherController, RecordedCalls],
+) -> None:
+    """A parent takeover owns the queue and current Sonos mode settings."""
+    controller, calls = started_sonos_controller
+    effects_before_takeover = list(calls.effects)
+
+    hass.states.async_set(
+        MEDIA_PLAYER,
+        "playing",
+        {
+            ATTR_SUPPORTED_FEATURES: int(SONOS_SPEAKER_FEATURES),
+            ATTR_MEDIA_CONTENT_ID: "x-sonos-vli:RINCON_TEST:2,spotify:parent-session",
+            ATTR_MEDIA_REPEAT: RepeatMode.ALL,
+        },
+        context=Context(user_id="parent-user"),
+    )
+    await hass.async_block_till_done()
+
+    assert controller.level is SoothingLevel.STANDBY
+    assert controller.state is SootherState.ATTENTION_REQUIRED
+    assert controller.diagnostics["playback_owned"] is False
+    assert controller.diagnostics["native_crossfade_loop_active"] is False
+    assert calls.effects == effects_before_takeover
+    assert hass.states.get(MEDIA_PLAYER).attributes[ATTR_MEDIA_REPEAT] == RepeatMode.ALL
+    assert hass.states.get(SONOS_CROSSFADE).state == STATE_ON
 
 
 async def test_persisted_active_startup_does_not_replace_existing_spotify(
@@ -452,7 +925,8 @@ async def test_failed_active_level_volume_change_rolls_back_level(
 
     hass.services.async_register("media_player", SERVICE_VOLUME_SET, _fail_volume)
 
-    await controller.async_set_level(SoothingLevel.LEVEL_1)
+    with pytest.raises(HomeAssistantError):
+        await controller.async_set_level(SoothingLevel.LEVEL_1)
 
     assert controller.level is SoothingLevel.BASELINE
     assert controller.entry.options[CONF_LEVEL] == SoothingLevel.BASELINE.value
@@ -482,13 +956,45 @@ async def test_failed_active_level_media_change_rolls_back_level(
 
     hass.services.async_register("media_player", SERVICE_PLAY_MEDIA, _fail_play)
 
-    await controller.async_set_level(SoothingLevel.LEVEL_1)
+    with pytest.raises(HomeAssistantError):
+        await controller.async_set_level(SoothingLevel.LEVEL_1)
 
     assert controller.level is SoothingLevel.STANDBY
     assert controller.entry.options[CONF_LEVEL] == SoothingLevel.STANDBY.value
     assert controller.state is SootherState.ATTENTION_REQUIRED
     assert controller.recommendation is Recommendation.CHECK_DEVICES
     await _advance(hass, 16)
+
+
+async def test_failed_parent_level_change_reports_noncritical_stop_failure(
+    hass: HomeAssistant,
+    started_controller: tuple[NurserySootherController, RecordedCalls],
+) -> None:
+    """A failed replacement stop is reported instead of silently reverting."""
+    controller, calls = started_controller
+    controller.sounds[SoothingLevel.LEVEL_1] = {
+        ATTR_MEDIA_CONTENT_ID: (
+            "media-source://media_source/local/level-1-white-noise.mp3"
+        ),
+        "media_content_type": "audio/mpeg",
+    }
+
+    @callback
+    def _fail_stop(call: ServiceCall) -> None:
+        del call
+        error_message = "speaker rejected stop"
+        raise HomeAssistantError(error_message)
+
+    hass.services.async_register("media_player", SERVICE_MEDIA_STOP, _fail_stop)
+
+    with pytest.raises(HomeAssistantError) as error:
+        await controller.async_set_level(SoothingLevel.LEVEL_1)
+
+    assert error.value.translation_key == "level_change_failed"
+    assert controller.level is SoothingLevel.BASELINE
+    assert controller.state is SootherState.ATTENTION_REQUIRED
+    assert controller.recommendation is Recommendation.CHECK_DEVICES
+    hass.services.async_register("media_player", SERVICE_MEDIA_STOP, calls.media.append)
 
 
 async def test_manual_two_pulse_evidence_suggests_exact_next_level(
@@ -524,6 +1030,30 @@ async def test_manual_two_pulse_evidence_suggests_exact_next_level(
         assert "Acknowledge" not in titles
 
 
+async def test_settling_timer_starts_only_after_cry_episode_ends(
+    hass: HomeAssistant,
+    started_controller: tuple[NurserySootherController, RecordedCalls],
+) -> None:
+    """Cry activity schedules its gap clock without a redundant settling clock."""
+    controller, _ = started_controller
+
+    await _set_cry(hass, "on")
+
+    assert controller.diagnostics["cry_episode_active"] is True
+    assert controller.diagnostics["timers"]["settling"] is False
+
+    await _advance(hass, controller.settings.cry_gap_seconds + 1)
+
+    assert controller.diagnostics["cry_episode_active"] is True
+    assert controller.diagnostics["timers"]["settling"] is False
+
+    await _set_cry(hass, "off")
+    await _advance(hass, controller.settings.cry_gap_seconds + 1)
+
+    assert controller.diagnostics["cry_episode_active"] is False
+    assert controller.diagnostics["timers"]["settling"] is True
+
+
 async def test_manual_suggestion_action_selects_exact_level_and_clears_all_phones(
     hass: HomeAssistant,
     started_controller: tuple[NurserySootherController, RecordedCalls],
@@ -542,6 +1072,40 @@ async def test_manual_suggestion_action_selects_exact_level_and_clears_all_phone
         ATTR_MEDIA_VOLUME_LEVEL
     ] == pytest.approx(LEVEL_1_PERCENT / 100)
     assert len(_clear_notifications(calls)) == PARENT_COUNT
+
+
+async def test_failed_notification_level_action_logs_without_listener_error(
+    hass: HomeAssistant,
+    started_controller: tuple[NurserySootherController, RecordedCalls],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A rejected phone level action is contained at the event-bus boundary."""
+    controller, calls = started_controller
+    await _initial_cry_pulses(hass)
+    await _advance(hass, 9)
+    action = _action_containing(_incident_notifications(calls)[0], "Level 1")
+
+    @callback
+    def _fail_volume(call: ServiceCall) -> None:
+        del call
+        error_message = "speaker rejected notification action"
+        raise HomeAssistantError(error_message)
+
+    hass.services.async_register("media_player", SERVICE_VOLUME_SET, _fail_volume)
+
+    with caplog.at_level(logging.WARNING):
+        hass.bus.async_fire(EVENT_NOTIFICATION_ACTION, {"action": action})
+        await hass.async_block_till_done()
+
+    assert controller.level is SoothingLevel.BASELINE
+    assert controller.state is SootherState.ATTENTION_REQUIRED
+    action_log = next(
+        record
+        for record in caplog.records
+        if record.getMessage()
+        == "Nursery notification level action failed for level_1 (HomeAssistantError)"
+    )
+    assert action_log.exc_info is None
 
 
 async def test_parent_level_selection_invalidates_stale_notification_actions(
@@ -607,6 +1171,30 @@ async def test_first_cry_event_immediately_starts_provisional_level_1(
     assert not _incident_notifications(calls)
 
 
+async def test_enabling_automatic_during_pending_cry_starts_provisional_level_1(
+    hass: HomeAssistant,
+    started_controller: tuple[NurserySootherController, RecordedCalls],
+) -> None:
+    """Enabling automatic re-evaluates evidence already collected manually."""
+    controller, calls = started_controller
+    await _cry_pulse(hass)
+    volume_count = len(_media_calls(calls, SERVICE_VOLUME_SET))
+
+    assert controller.level is SoothingLevel.BASELINE
+    assert controller.state is SootherState.CRY_PENDING
+    assert controller.diagnostics["provisional_level_1"] is False
+
+    await controller.async_set_automatic(enabled=True)
+
+    assert controller.level is SoothingLevel.LEVEL_1
+    assert controller.state is SootherState.CRY_PENDING
+    assert controller.recommendation is Recommendation.WAIT
+    assert controller.diagnostics["provisional_level_1"] is True
+    assert controller.diagnostics["timers"]["provisional"] is True
+    assert len(_media_calls(calls, SERVICE_VOLUME_SET)) == volume_count + 1
+    assert not _incident_notifications(calls)
+
+
 async def test_unconfirmed_provisional_level_1_returns_to_baseline_after_dwell(
     hass: HomeAssistant,
     started_controller: tuple[NurserySootherController, RecordedCalls],
@@ -630,6 +1218,35 @@ async def test_unconfirmed_provisional_level_1_returns_to_baseline_after_dwell(
         ATTR_MEDIA_VOLUME_LEVEL
     ] == pytest.approx(BASELINE_PERCENT / 100)
     assert not _incident_notifications(calls)
+
+
+async def test_provisional_level_1_runs_only_once_per_sparse_cry_episode(
+    hass: HomeAssistant,
+    started_controller: tuple[NurserySootherController, RecordedCalls],
+) -> None:
+    """Sparse events cannot repeatedly restart the episode's provisional output."""
+    controller, calls = started_controller
+    await controller.async_set_automatic(enabled=True)
+    await _cry_pulse(hass)
+
+    await _advance(hass, 21)
+    assert controller.level is SoothingLevel.BASELINE
+    assert controller.diagnostics["initial_level_1_applied"] is True
+    volume_count = len(_media_calls(calls, SERVICE_VOLUME_SET))
+
+    for delay in (19, 40):
+        await _advance(hass, delay)
+        await _cry_pulse(hass)
+        assert controller.level is SoothingLevel.BASELINE
+
+    assert len(_media_calls(calls, SERVICE_VOLUME_SET)) == volume_count
+    assert not _incident_notifications(calls)
+
+    await _advance(hass, controller.settings.cry_gap_seconds + 1)
+    await _cry_pulse(hass)
+
+    assert controller.level is SoothingLevel.LEVEL_1
+    assert controller.diagnostics["provisional_level_1"] is True
 
 
 async def test_disabling_automatic_rolls_back_provisional_level_1(
@@ -1195,6 +1812,30 @@ async def test_continuous_owned_playback_restarts_after_idle(
     await hass.async_block_till_done()
 
     assert len(_media_calls(calls, SERVICE_PLAY_MEDIA)) == play_count + 1
+
+
+async def test_media_player_unavailable_then_idle_restarts_before_soothing(
+    hass: HomeAssistant,
+    started_controller: tuple[NurserySootherController, RecordedCalls],
+) -> None:
+    """Dependency recovery cannot report Soothing while stale ownership is idle."""
+    controller, calls = started_controller
+    play_count = len(_media_calls(calls, SERVICE_PLAY_MEDIA))
+
+    hass.states.async_set(MEDIA_PLAYER, STATE_UNAVAILABLE)
+    await hass.async_block_till_done()
+    assert controller.state is SootherState.ATTENTION_REQUIRED
+
+    hass.states.async_set(
+        MEDIA_PLAYER,
+        "idle",
+        {ATTR_SUPPORTED_FEATURES: int(SPEAKER_FEATURES)},
+    )
+    await hass.async_block_till_done()
+
+    assert len(_media_calls(calls, SERVICE_PLAY_MEDIA)) == play_count + 1
+    assert controller.diagnostics["playback_owned"] is True
+    assert controller.state is SootherState.SOOTHING
 
 
 async def test_sonos_auth_signature_rotation_keeps_playback_owned(
@@ -1812,7 +2453,8 @@ async def test_arbitrary_play_failure_is_isolated_and_compensated(
 
     hass.services.async_register("media_player", SERVICE_PLAY_MEDIA, _start_then_fail)
 
-    await controller.async_set_level(SoothingLevel.BASELINE)
+    with pytest.raises(HomeAssistantError):
+        await controller.async_set_level(SoothingLevel.BASELINE)
     await hass.async_block_till_done()
 
     assert controller.state is SootherState.ATTENTION_REQUIRED
@@ -1854,7 +2496,8 @@ async def test_immediate_play_rejection_does_not_stop_parent_media(
 
     hass.services.async_register("media_player", SERVICE_PLAY_MEDIA, _reject_play)
 
-    await controller.async_set_level(SoothingLevel.BASELINE)
+    with pytest.raises(HomeAssistantError):
+        await controller.async_set_level(SoothingLevel.BASELINE)
 
     assert controller.state is SootherState.ATTENTION_REQUIRED
     assert len(_media_calls(calls, SERVICE_MEDIA_STOP)) == stop_count
@@ -1880,7 +2523,8 @@ async def test_delayed_failed_play_context_is_compensated(
     hass.services.async_register(
         "media_player", SERVICE_PLAY_MEDIA, _reject_then_start_later
     )
-    await controller.async_set_level(SoothingLevel.BASELINE)
+    with pytest.raises(HomeAssistantError):
+        await controller.async_set_level(SoothingLevel.BASELINE)
     failed_context = _media_calls(calls, SERVICE_PLAY_MEDIA)[-1].context
 
     hass.states.async_set(

@@ -120,8 +120,12 @@ Before setup, make these available in Home Assistant:
 - one or more Home Assistant Companion app notification actions named
   `notify.mobile_app_*`.
 
-The integration is device-agnostic. Reolink and Sonos are useful examples, but
-no vendor-specific API or SDK is required.
+The integration uses Home Assistant entity and action boundaries. Reolink and
+Sonos remain optional, and no vendor SDK is required. When the selected player
+is Sonos and exposes the required queue and repeat features plus its paired
+crossfade switch, Nursery Soother uses those standard Home Assistant controls
+for seamless looping. Other players use the generic playback path described
+below.
 
 ## Installation with HACS
 
@@ -297,11 +301,60 @@ notifications](https://companion.home-assistant.io/docs/notifications/actionable
 
 ## Dashboard
 
-Nursery Soother uses native entities, so no custom dashboard card is required.
-A starting view is available in
-[`examples/dashboard.yaml`](examples/dashboard.yaml). Before pasting it into a
-manual dashboard, replace every sample entity ID with the IDs shown on the
-Nursery Soother device page and replace the sample camera entity.
+Nursery Soother ships an optional `custom:nursery-soother-card` that combines
+the nursery camera, policy status, recommendation, attention state, exact level
+control, Automatic operation, and Level lock. When Home Assistant's frontend is
+available, the integration serves and loads the card module automatically from
+`/nursery_soother/nursery-soother-card.js`; do not add a separate dashboard
+resource. On Home Assistant 2026.7 or newer, choose **Add card > Nursery
+Soother** to configure it with the built-in visual editor.
+
+Manual YAML uses these keys:
+
+| Key | Required | Value |
+| --- | --- | --- |
+| `type` | Yes | `custom:nursery-soother-card` |
+| `camera_entity` | Yes | Configured nursery `camera` |
+| `level_entity` | Yes | Nursery Soother level `select` |
+| `automatic_entity` | Yes | Automatic operation `switch` |
+| `lock_entity` | Yes | Level lock `switch` |
+| `state_entity` | Yes | Policy-state `sensor` |
+| `recommendation_entity` | Yes | Recommendation `sensor` |
+| `attention_entity` | Yes | Attention-required `binary_sensor` |
+| `camera_view` | No | `live` (default), `auto`, or `image` |
+
+```yaml
+type: custom:nursery-soother-card
+camera_entity: camera.nursery
+level_entity: select.nursery_soother_level
+automatic_entity: switch.nursery_soother_automatic_operation
+lock_entity: switch.nursery_soother_level_lock
+state_entity: sensor.nursery_soother_state
+recommendation_entity: sensor.nursery_soother_recommendation
+attention_entity: binary_sensor.nursery_soother_attention_required
+camera_view: live
+```
+
+The six level buttons call `select.select_option` for Standby, Baseline, or an
+exact Level 1–4. The **Auto** and **Lock** controls call `switch.turn_on` or
+`switch.turn_off` from the current switch state, and **Set** applies the exact
+level exposed in the recommendation sensor's `suggested_level` attribute.
+`live` and `auto` use Home Assistant's picture-entity camera behavior, while
+`image` refreshes the authenticated camera snapshot every 10 seconds. Tapping
+any camera view opens the standard camera more-info dialog. When attention is
+required, **Attend** opens that same camera dialog; it does not acknowledge or clear attention,
+change the level, or call a separate Acknowledge action.
+Volume numbers and **Simulate cry event** remain available through native
+entity cards and the device page rather than this compact card.
+
+Entity IDs are registry data and can be renamed. Select the configured camera
+and the six entities shown on the Nursery Soother device page instead of
+relying on the sample IDs above. If an entity is renamed after the card is
+configured, update that field in the visual editor or YAML. A complete starting
+view is available in
+[`examples/dashboard.yaml`](examples/dashboard.yaml), including a commented
+native-card fallback. The custom card is optional: standard Home Assistant
+cards and actions continue to expose the integration's full entity contract.
 
 ## Siri and Apple Shortcuts
 
@@ -313,6 +366,37 @@ or **Perform action** actions. For example, “Nursery Level 2” can select
 The same select and switch entities can be exposed through HomeKit Bridge. See
 Home Assistant's current [Apple App Intents and Siri Shortcuts
 guide](https://companion.home-assistant.io/docs/integrations/siri-shortcuts/).
+
+## Playback continuity
+
+For a compatible Sonos player, Nursery Soother replaces the current Sonos
+queue with one copy of the selected track, enables the player's crossfade, and
+sets repeat to **All**. Sonos then loops that single queue item itself. Home
+Assistant does not repopulate the queue at every track boundary, so the loop
+does not depend on a periodic timer or a new play command when the track ends.
+
+The Sonos optimization deliberately replaces any queue that existed before the
+soothing session and cannot restore those prior queue items. On a normal
+Standby, unload, or owned-playback stop, Nursery Soother clears its queue and
+restores the repeat and crossfade values it observed before the session. It
+restores a setting only when it still has the value Nursery Soother applied;
+if the Sonos group changed, it leaves both settings alone. If a parent or
+another source takes over playback, Nursery Soother makes no queue, repeat, or
+crossfade call, because preserving the replacement audio takes priority over
+restoring its snapshot.
+
+If an owned Sonos session unexpectedly reports idle, off, or paused, Nursery
+Soother rebuilds the one-item queue. That recovery asks Home Assistant to
+resolve the configured Local Media item again, so a new signed media URL is
+used when necessary. Home Assistant Local Media URLs currently have a 24-hour
+signature lifetime, so an uninterrupted Sonos queue must not be treated as a
+forever guarantee. A
+session that reaches URL expiry can stop before the idle recovery rebuilds it,
+with an audible interruption; the tested target is an overnight session within
+that URL lifetime. A player that does not expose the complete Sonos feature set
+falls back to one direct `play_media` call and the same idle-state recovery,
+without changing a queue, repeat mode, or crossfade setting. Test continuity
+and stop behavior on the actual speaker before relying on either path.
 
 ## Privacy and diagnostics
 
@@ -331,12 +415,14 @@ or notification contents.
 
 The level-to-sound model is separate from level-to-volume policy, and every
 active level has its own Local Media selection. This release does not include
-schedules, multiple cry inputs, long-term event analytics, a custom frontend
-card, or device-specific Reolink, Sonos, or Frigate behavior.
+schedules, multiple cry inputs, long-term event analytics, or device-specific
+Reolink or Frigate behavior. Sonos has the bounded playback-continuity
+optimization described above; all policy and ownership rules remain shared
+with other players.
 
 The controller requests playback again when its owned player reports idle,
 off, or paused. Continuous behavior still depends on the selected player and
-media item, so choose a long audio file and verify it on the actual speaker.
+media item, so verify it on the actual speaker.
 If a parent starts different media, Nursery Soother relinquishes the speaker,
 moves its visible level to Standby, requests attention, and does not alter or
 stop that media. From that visible Standby state, select the desired active

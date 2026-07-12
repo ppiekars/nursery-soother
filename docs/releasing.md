@@ -25,9 +25,12 @@ Default HACS inclusion requires validation with no ignores.
 
 Use semantic versions. Keep the version in
 `custom_components/nursery_soother/manifest.json` aligned with the published
-release and project metadata.
+release and project metadata. Whenever
+`frontend/nursery-soother-card.js` changes, increment `CARD_MODULE_VERSION` in
+`custom_components/nursery_soother/frontend.py` so browsers request the new
+module after the update.
 
-Create a matching GitHub release tag such as `v0.6.0`. HACS does not treat a
+Create a matching GitHub release tag such as `v0.7.0`. HACS does not treat a
 tag without a published GitHub release as a release. Do not publish the tag
 until the exact commit has passed automated validation and the live Home
 Assistant smoke test.
@@ -46,6 +49,14 @@ Every release in this product line retains these safety semantics:
   Maximum;
 - Baseline and Levels 1–4 each map to a selected local audio item, with reuse of
   the same item allowed;
+- compatible Sonos players use one queued item with crossfade and repeat-all;
+  the queue is not periodically repopulated, while an owned idle state rebuilds
+  it with a freshly resolved Local Media URL;
+- Sonos loop setup replaces the existing queue; normal stop restores captured
+  repeat and crossfade values, while external takeover leaves the replacement
+  playback, queue, repeat, and crossfade untouched;
+- other media players retain direct playback and owned-idle recovery without
+  queue, repeat, or crossfade changes;
 - off-to-on cry transitions are event samples; one short falling edge is not
   treated as a settled child;
 - initial confirmation uses two events or eight cumulative active seconds in a
@@ -82,6 +93,8 @@ Run from the repository root:
 
 ```console
 uv sync --locked
+node --check custom_components/nursery_soother/frontend/nursery-soother-card.js
+node --test tests/frontend/nursery-soother-card.test.mjs
 uv run pre-commit run --all-files
 uv run pytest --cov --cov-report=term-missing
 ```
@@ -111,9 +124,16 @@ The test suite must cover:
   gap and Standby at expiry;
 - exact media-player and notification payloads;
 - distinct and reused per-level media mappings and exact-level resolution;
+- compatible Sonos one-item queue, repeat-all and crossfade setup, no periodic
+  repopulation, fresh-URL idle recovery, queue replacement, normal restoration,
+  external-takeover restraint, and generic-player fallback;
 - stale notification rejection after level selection, episode close, Standby,
   reload, and restart;
 - config-entry setup, reload, unload, and listener/timer cleanup;
+- one-time frontend registration, static card URL, and extra-module loading;
+- card form filters, native action mapping, exact-next recommendation guards,
+  camera fallback/refresh/cancellation, signed snapshot URLs, and attention
+  semantics;
 - missing, unknown, and unavailable cry sensor, camera, speaker, and notify
   targets;
 - playback takeover, explicit same-ID user replay, and signed local-media URL
@@ -144,6 +164,36 @@ against a sleeping child or an unverified speaker.
 6. Confirm the level is Standby and Automatic operation is off.
 7. Confirm setup did not play media or change volume.
 
+### Validate the optional dashboard card
+
+1. On Home Assistant 2026.7 or newer, confirm the browser loads
+   `/nursery_soother/nursery-soother-card.js` without a JavaScript or network
+   error and without a manually configured dashboard resource.
+2. Choose **Add card > Nursery Soother** and confirm the visual editor exposes
+   `camera_entity`, `level_entity`, `automatic_entity`, `lock_entity`,
+   `state_entity`, `recommendation_entity`, `attention_entity`, and the optional
+   `camera_view` choice (`live`, `auto`, or `image`).
+3. Select the configured camera plus the six entities from the Nursery Soother
+   device. Save, reopen the editor, and confirm every selection and camera mode
+   round-trips.
+4. Exercise all six exact level buttons and the Auto and Lock controls. Confirm
+   they call the corresponding native select or switch action and reflect
+   entity-state updates from elsewhere in Home Assistant.
+5. Produce an `increase_level` recommendation with a valid `suggested_level`.
+   Confirm **Set** selects exactly that level and stale or malformed
+   recommendations do not issue an action.
+6. Exercise `live`, `auto`, and `image` camera modes. Confirm the camera area
+   opens the standard camera more-info dialog.
+7. Trigger Attention required and confirm the attention banner appears.
+   Press **Attend** and verify it only opens the camera more-info dialog: it
+   must not clear attention, change level, or perform an Acknowledge action.
+8. Rename one referenced entity, update its card field through the visual
+   editor, and confirm the card recovers without relying on a default entity
+   ID.
+9. Replace the custom card with the native fallback in
+   `examples/dashboard.yaml`. Confirm camera, level, switches, status, and
+   attention remain usable without the custom card.
+
 ### Validate exact level and volume behavior
 
 1. Set deliberately low Baseline and Level 1–4 volumes with
@@ -171,6 +221,30 @@ against a sleeping child or an unverified speaker.
 9. Explicitly replay the configured sound from a user context. Confirm Nursery
    Soother still relinquishes ownership and moves to visible Standby even when
    the raw media ID is unchanged.
+
+### Validate Sonos continuity and fallback
+
+1. On a compatible Sonos player, note its current queue, repeat mode,
+   crossfade state, and group membership. Use a short, loop-ready Local Media
+   track and a deliberately low test volume.
+2. Select an active level. Confirm Nursery Soother replaces the queue with
+   exactly one item, enables crossfade, and selects repeat-all.
+3. Listen through a track boundary. Confirm Sonos loops it cleanly without a
+   second queue item or a new Home Assistant play action at the boundary.
+4. Force the still-owned player to idle. Confirm Nursery Soother rebuilds the
+   one-item queue and Home Assistant resolves the Local Media source again.
+   Record that time-limited Local Media URLs prevent a forever-playback
+   guarantee; a stop at URL expiry can introduce a recovery gap.
+5. Select Standby. Confirm the owned queue is cleared and the repeat and
+   crossfade values from step 1 are restored. If group membership is changed
+   during the session, confirm those settings are left untouched instead.
+   Confirm the original queue items are not restored.
+6. Select an active level again, then start replacement media from another
+   source. Confirm Nursery Soother enters visible Standby without stopping
+   playback or changing the live queue, repeat mode, or crossfade state.
+7. Repeat the active-level and idle-recovery checks with a non-Sonos player, or
+   a fixture missing one required Sonos feature. Confirm it uses direct media
+   playback and never calls queue, repeat, or crossfade actions.
 
 ### Validate pulse evidence in manual mode
 
@@ -282,12 +356,14 @@ event evidence, or caregiver response.
 Before tagging, compare the implementation with:
 
 - `README.md` level semantics, event evidence, defaults, entities,
-  notifications, safety, limitations, and troubleshooting;
+  notifications, dashboard-card configuration and fallback, safety,
+  Sonos continuity and queue replacement, limitations, and troubleshooting;
 - `docs/architecture.md` evidence generations, timers, side-effect guards,
-  ownership, and attention invariants;
-- `examples/dashboard.yaml` level select, Automatic operation and Level lock
-  switches, six
-  numbers, status entities, and confirmed artificial-event action;
+  ownership, Sonos native-loop ownership, attention invariants, and frontend
+  registration boundary;
+- `examples/dashboard.yaml` optional custom card, all seven entity references,
+  camera mode, rename guidance, native-card fallback, six numbers, and
+  confirmed artificial-event action;
 - `product_pitch.md` so implemented per-level sounds and remaining deferred
   features are described accurately.
 
@@ -306,6 +382,10 @@ Release notes must highlight:
 - the pulse-event confirmation rule and timing defaults;
 - gradual quiet downshift and the 150-second Standby/attention cutoff;
 - the independent Local Media selection for every active level;
+- the Sonos one-item crossfade/repeat-all optimization, queue replacement, and
+  generic-player fallback;
+- the optional auto-loaded dashboard card and its supported Home Assistant
+  version;
 - any change that can start, stop, or alter speaker playback;
 - the reminder that Nursery Soother is not a medical device or substitute for
   adult supervision.

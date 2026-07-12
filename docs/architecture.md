@@ -15,9 +15,11 @@ One config entry consumes:
   from Home Assistant's Local media source;
 - one or more `notify.mobile_app_*` actions for caregiver communication.
 
-The implementation remains device-agnostic. Standard Home Assistant entity
-states, supported features, actions, selectors, and events are the integration
-boundary. Reolink and Sonos are the initial live setup, not dependencies.
+Standard Home Assistant entity states, supported features, actions, selectors,
+and events remain the integration boundary. Reolink and Sonos are optional,
+not dependencies. A capability-gated Sonos path uses the integration's queue,
+repeat, and crossfade controls, while every other player retains the generic
+media-player path.
 
 ## Superseding product contract
 
@@ -101,12 +103,15 @@ they are not interpreted as proof that the child is settled.
 
 ```text
 custom_components/nursery_soother/
-├── __init__.py          # config-entry lifecycle and platform forwarding
+├── __init__.py          # integration-global frontend and config-entry lifecycle
 ├── config_flow.py       # setup, reconfigure, and options flows
 ├── const.py             # shared keys, defaults, platforms, and action IDs
 ├── models.py            # levels, state, recommendation, and settings models
 ├── controller.py        # evidence policy, timers, and guarded side effects
 ├── entity.py            # shared controller-backed entity behavior
+├── frontend.py          # static card path and extra-module registration
+├── frontend/
+│   └── nursery-soother-card.js  # optional Lovelace card and visual editor
 ├── select.py            # exact Standby/Baseline/Level 1–4 control
 ├── switch.py            # Automatic operation and Level lock controls
 ├── sensor.py            # policy-state and recommendation sensors
@@ -119,9 +124,58 @@ custom_components/nursery_soother/
     └── en.json          # flow, entity, level, state, and error translations
 ```
 
-Standard entity actions are sufficient for dashboards, automations, HomeKit
-Bridge, and Apple Shortcuts. A custom service action or frontend card is not
-required.
+Standard entity actions remain the integration contract for dashboards,
+automations, HomeKit Bridge, and Apple Shortcuts. The optional frontend card is
+a compact client of that contract, not an alternate controller or service API.
+
+## Frontend registration and card boundary
+
+The manifest lists `frontend` as an optional `after_dependency`, preserving
+headless operation. When `frontend` is loaded, integration-level `async_setup`
+calls `async_register_frontend` once per Home Assistant run. The helper serves
+`custom_components/nursery_soother/frontend/nursery-soother-card.js` at
+`/nursery_soother/nursery-soother-card.js` with cache headers disabled and adds
+a `CARD_MODULE_VERSION` query to the extra JavaScript module URL. The versioned
+URL prevents a HACS update from reusing an older browser cache. The card is
+therefore available in Lovelace without a manually configured resource. A
+headless Home Assistant instance skips this registration. Registration is
+global rather than config-entry-owned; unloading an entry does not unregister
+the static path or module URL.
+
+The `custom:nursery-soother-card` configuration is an explicit set of entity
+registry references:
+
+| Key | Domain | Role |
+| --- | --- | --- |
+| `camera_entity` | `camera` | Camera image/stream and more-info target |
+| `level_entity` | `select` | Exact Standby, Baseline, or Level 1–4 control |
+| `automatic_entity` | `switch` | Automatic operation control |
+| `lock_entity` | `switch` | Level lock control |
+| `state_entity` | `sensor` | Current policy phase |
+| `recommendation_entity` | `sensor` | Recommendation and `suggested_level` |
+| `attention_entity` | `binary_sensor` | Direct-care attention state |
+
+All seven keys are required. Optional `camera_view` accepts `live` (the
+default), `auto`, or `image`. `getConfigForm` exposes the same schema through
+the visual editor on the supported Home Assistant 2026.7 baseline.
+`getStubConfig` defaults only the camera mode and deliberately leaves every
+required entity for the user to select, so multiple nurseries or renamed
+registry entries cannot be silently mixed by naming guesses. A later entity
+rename therefore requires updating the Lovelace config.
+
+The card reads state from those entities and invokes only standard Home
+Assistant select and switch actions. Its six level controls select exact
+options with `select.select_option`, Auto and Lock call `switch.turn_on` or
+`switch.turn_off`, and a valid recommendation can select its exact
+`suggested_level`. `live` and `auto` delegate rendering to a native
+picture-entity card and fall back to an authenticated snapshot; `image` uses
+that snapshot directly and refreshes it every 10 seconds. Camera taps open Home
+Assistant's normal camera more-info dialog. The attention banner's Attend
+action opens the same dialog and deliberately does not acknowledge or clear
+attention or change the level.
+Configuration-only volume numbers and the artificial-event button stay on
+native entity surfaces. Native cards remain a complete fallback if the
+optional module cannot render.
 
 ## Config-entry lifecycle
 
@@ -429,6 +483,9 @@ The controller calls standard Home Assistant actions:
 - `media_player.volume_set` for an active level's capped volume;
 - `media_player.play_media` for that level's mapped sound;
 - `media_player.media_stop`, or pause as a fallback, for Standby;
+- `media_player.clear_playlist` and `media_player.repeat_set` for a compatible
+  Sonos loop;
+- `switch.turn_on` or `switch.turn_off` for that Sonos player's crossfade;
 - selected `notify.mobile_app_*` actions for caregiver notifications.
 
 Before issuing an effect, it checks entity availability, required media-player
@@ -436,6 +493,40 @@ features, selected level, evidence/episode validity where applicable, playback
 ownership, and volume bounds. Camera availability is required for a normal
 caregiver response; loss is reported rather than treated as permission to
 increase.
+
+### Sonos native-loop boundary
+
+The optimized path is selected only when the configured entity is registered
+by the Sonos integration, its paired crossfade switch can be identified, and
+the player exposes clear-playlist, enqueue, and repeat controls. The controller
+captures the initial repeat mode, crossfade state, and Sonos group membership;
+enables crossfade when needed; clears the queue; enqueues the selected Local
+Media track once with playback; and selects repeat-all. Sonos owns every loop
+boundary after that setup. There is no timer or periodic queue repopulation.
+
+This is a one-item queue, not two duplicate entries. It is also intentionally
+destructive to the previous Sonos queue: starting a soothing session replaces
+that queue, and Nursery Soother cannot reconstruct it later. A normal Standby,
+unload, or owned-playback stop clears the integration-owned queue and restores
+the captured repeat and crossfade values only if the same group still exposes
+the values Nursery Soother set. It does not overwrite a later parent setting.
+If group membership changed, cleanup leaves repeat and crossfade untouched.
+
+An external playback takeover is a stronger ownership boundary. The controller
+forgets its native-loop snapshot and makes no stop, clear-queue, repeat, or
+crossfade request, even though that means the temporary settings may remain.
+The replacement media and its current controls belong to the parent.
+
+Unexpected idle, off, or paused state while playback is still owned triggers a
+fresh setup of the same one-item queue. The Local Media source is resolved
+again by Home Assistant, refreshing a signed media URL rather than depending
+on the URL from the original start. Local Media signing currently has a 24-hour
+lifetime, so the static queue is not a forever-playback guarantee: a session
+that crosses URL expiry may stop and incur a gap before idle recovery can
+resolve a fresh URL.
+The supported target is an overnight session within that URL lifetime. Players
+without the full Sonos capability set use direct `play_media`; they receive the
+same owned-idle recovery but no queue, repeat, or crossfade mutation.
 
 If another source replaces the owned sound, the controller relinquishes the
 speaker, moves the visible output level to Standby, cancels response timers,
@@ -584,7 +675,8 @@ without raw camera payloads or notification bodies.
   not extended by level changes, is canceled by event-gap expiry, and enters
   Standby with caregiver attention at expiry.
 - Safety tests cover monotonic configuration, the runtime Maximum cap,
-  Standby, dependency loss, playback takeover, and failed media actions.
+  Standby, dependency loss, playback takeover, failed media actions, Sonos
+  one-item repeat-all setup, idle rebuilding, and conservative setting cleanup.
 - Simulation tests prove one press contributes one event and uses the same
   policy without mutating the physical sensor.
 - Notification tests cover evidence summaries, exact-level action IDs,

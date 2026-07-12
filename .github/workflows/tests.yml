@@ -23,6 +23,8 @@ jobs:
         run: uv python install 3.14
       - name: Install dependencies
         run: uv sync --locked
+      - name: Test dashboard card
+        run: node --test tests/frontend/nursery-soother-card.test.mjs
       - name: Run pre-commit checks
         run: uv run pre-commit run --all-files
       - name: Test

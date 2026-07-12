@@ -7,3 +7,9 @@ __pycache__/
 *.py[cod]
 coverage.xml
 htmlcov/
+
+# Local/copyrighted media and standalone card prototypes are not release assets.
+/*.wav
+/*.mp3
+/SNOO/
+/Nursery Soother Card (standalone).html

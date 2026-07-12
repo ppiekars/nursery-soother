@@ -68,14 +68,6 @@ class NurserySootherVolumeNumber(NurserySootherEntity, NumberEntity):
 
     entity_description: NumberEntityDescription
 
-    def __init__(
-        self,
-        entry: ConfigEntry[NurserySootherController],
-        description: NumberEntityDescription,
-    ) -> None:
-        """Initialize a volume control."""
-        super().__init__(entry, description)
-
     @property
     def native_value(self) -> float:
         """Return the configured percentage."""
