@@ -15,6 +15,7 @@ cards:
   - type: custom:nursery-soother-card
     camera_entity: camera.nursery
     level_entity: select.nursery_soother_level
+    baseline_entity: switch.nursery_soother_baseline_sound_preview
     automatic_entity: switch.nursery_soother_automatic_operation
     lock_entity: switch.nursery_soother_level_lock
     state_entity: sensor.nursery_soother_state

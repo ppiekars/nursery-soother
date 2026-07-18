@@ -3,6 +3,7 @@ const CARD_TAG = "nursery-soother-card";
 const REQUIRED_ENTITIES = Object.freeze({
   camera_entity: "camera",
   level_entity: "select",
+  baseline_entity: "switch",
   automatic_entity: "switch",
   lock_entity: "switch",
   state_entity: "sensor",
@@ -78,6 +79,7 @@ const SNAPSHOT_REFRESH_MS = 10_000;
 const FORM_LABELS = Object.freeze({
   camera_entity: "Nursery camera",
   level_entity: "Soothing level",
+  baseline_entity: "Baseline sound preview",
   automatic_entity: "Automatic operation",
   lock_entity: "Level lock",
   state_entity: "Policy state",
@@ -246,6 +248,62 @@ const CARD_STYLES = `
 
   .state-dot.pulse {
     animation: ns-pulse 1.4s ease-in-out infinite;
+  }
+
+  .camera-timer,
+  .speaker-button {
+    position: absolute;
+    z-index: 3;
+    bottom: 8px;
+    color: #ffffff;
+    background: rgba(0, 0, 0, 0.62);
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.24);
+  }
+
+  .camera-timer {
+    left: 8px;
+    min-width: 48px;
+    padding: 6px 9px;
+    border-radius: 999px;
+    box-sizing: border-box;
+    font-size: 12px;
+    font-variant-numeric: tabular-nums;
+    font-weight: 700;
+    line-height: 1;
+    text-align: center;
+    pointer-events: none;
+  }
+
+  .camera-timer.is-active {
+    background: rgba(0, 0, 0, 0.74);
+  }
+
+  .speaker-button {
+    right: 8px;
+    display: grid;
+    width: 34px;
+    height: 34px;
+    padding: 7px;
+    place-items: center;
+    border: 1px solid rgba(255, 255, 255, 0.34);
+    border-radius: 50%;
+    transition: background-color 120ms ease, transform 120ms ease;
+  }
+
+  .speaker-button.is-on {
+    color: #12231d;
+    background: #68d7ad;
+    border-color: #68d7ad;
+  }
+
+  .speaker-button:not(:disabled):active {
+    transform: translateY(1px);
+  }
+
+  .speaker-button svg {
+    width: 100%;
+    height: 100%;
+    fill: currentColor;
   }
 
   .banner {
@@ -475,7 +533,8 @@ const CARD_STYLES = `
     }
 
     .level-button,
-    .pill {
+    .pill,
+    .speaker-button {
       transition: none;
     }
   }
@@ -518,6 +577,8 @@ class NurserySootherCard extends HTMLElement {
     this._cameraGeneration = 0;
     this._snapshotRefreshTimer = undefined;
     this._snapshotRefreshToken = undefined;
+    this._sessionRefreshTimer = undefined;
+    this._sessionStartedAt = undefined;
   }
 
   static getConfigForm() {
@@ -534,6 +595,15 @@ class NurserySootherCard extends HTMLElement {
           selector: {
             entity: {
               filter: { domain: "select", integration: "nursery_soother" },
+            },
+          },
+        },
+        {
+          name: "baseline_entity",
+          required: true,
+          selector: {
+            entity: {
+              filter: { domain: "switch", integration: "nursery_soother" },
             },
           },
         },
@@ -670,6 +740,7 @@ class NurserySootherCard extends HTMLElement {
   disconnectedCallback() {
     this._cameraGeneration += 1;
     this._stopSnapshotRefresh();
+    this._stopSessionRefresh();
   }
 
   getCardSize() {
@@ -736,6 +807,23 @@ class NurserySootherCard extends HTMLElement {
             <span class="state-dot"></span>
             <span class="status-text">Unavailable</span>
           </div>
+          <time
+            class="camera-timer"
+            datetime="PT0S"
+            aria-label="Soothing session timer"
+          >00:00</time>
+          <button
+            class="speaker-button"
+            type="button"
+            data-action="toggle-baseline-preview"
+            aria-label="Play Baseline sound without starting Nursery Soother"
+            aria-pressed="false"
+            title="Play Baseline sound"
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M3 9v6h4l5 4V5L7 9H3zm13.5 3a4.5 4.5 0 0 0-2.5-4.03v8.05A4.5 4.5 0 0 0 16.5 12zm-2.5-8.7v2.06a7 7 0 0 1 0 13.28v2.06a9 9 0 0 0 0-17.4z"></path>
+            </svg>
+          </button>
         </div>
 
         <div
@@ -852,6 +940,7 @@ class NurserySootherCard extends HTMLElement {
     }
 
     const levelState = this._state(this._config.level_entity);
+    const baselineState = this._state(this._config.baseline_entity);
     const automaticState = this._state(this._config.automatic_entity);
     const lockState = this._state(this._config.lock_entity);
     const policyState = this._state(this._config.state_entity);
@@ -929,6 +1018,12 @@ class NurserySootherCard extends HTMLElement {
       automaticState,
     );
     this._updatePill(this.shadowRoot.querySelector(".lock-button"), lockState);
+    this._updateBaselineButton(
+      this.shadowRoot.querySelector(".speaker-button"),
+      baselineState,
+      levelState,
+    );
+    this._updateSessionTimer(levelState, policyState);
 
     const missingEntities = Object.keys(REQUIRED_ENTITIES)
       .map((key) => this._config[key])
@@ -951,6 +1046,93 @@ class NurserySootherCard extends HTMLElement {
     button.classList.toggle("is-on", on);
     button.setAttribute("aria-pressed", String(on));
     button.disabled = !available || Boolean(this._pendingAction);
+  }
+
+  _updateBaselineButton(button, baselineState, levelState) {
+    const available = isUsableSwitchState(baselineState);
+    const on = available && baselineState.state === "on";
+    const sessionActive =
+      isUsableState(levelState) && levelState.state !== "standby";
+    button.classList.toggle("is-on", on);
+    button.setAttribute("aria-pressed", String(on));
+    button.setAttribute(
+      "aria-label",
+      on
+        ? "Stop Baseline sound preview"
+        : "Play Baseline sound without starting Nursery Soother",
+    );
+    button.title = on ? "Stop Baseline sound" : "Play Baseline sound";
+    button.disabled =
+      !available ||
+      (sessionActive && !on) ||
+      Boolean(this._pendingAction);
+  }
+
+  _updateSessionTimer(levelState, policyState) {
+    const active =
+      isUsableState(levelState) && levelState.state !== "standby";
+    const configuredStart = Date.parse(
+      policyState?.attributes?.session_started_at ?? "",
+    );
+
+    if (!active) {
+      this._sessionStartedAt = undefined;
+      this._stopSessionRefresh();
+      this._renderSessionTimer(false);
+      return;
+    }
+
+    if (Number.isFinite(configuredStart)) {
+      this._sessionStartedAt = configuredStart;
+    } else if (this._sessionStartedAt === undefined) {
+      this._sessionStartedAt = Date.now();
+    }
+    this._renderSessionTimer(true);
+    this._scheduleSessionRefresh();
+  }
+
+  _scheduleSessionRefresh() {
+    if (
+      this._sessionRefreshTimer !== undefined ||
+      !this.isConnected ||
+      typeof window.setInterval !== "function"
+    ) {
+      return;
+    }
+    this._sessionRefreshTimer = window.setInterval(() => {
+      this._renderSessionTimer(true);
+    }, 1_000);
+  }
+
+  _stopSessionRefresh() {
+    if (this._sessionRefreshTimer === undefined) {
+      return;
+    }
+    if (typeof window.clearInterval === "function") {
+      window.clearInterval(this._sessionRefreshTimer);
+    }
+    this._sessionRefreshTimer = undefined;
+  }
+
+  _renderSessionTimer(active) {
+    const timer = this.shadowRoot.querySelector(".camera-timer");
+    const elapsedSeconds =
+      active && this._sessionStartedAt !== undefined
+        ? Math.max(0, Math.floor((Date.now() - this._sessionStartedAt) / 1_000))
+        : 0;
+    this._setTextIfChanged(timer, this._formatElapsed(elapsedSeconds));
+    timer.classList.toggle("is-active", active);
+    timer.setAttribute("datetime", `PT${elapsedSeconds}S`);
+  }
+
+  _formatElapsed(elapsedSeconds) {
+    const hours = Math.floor(elapsedSeconds / 3_600);
+    const minutes = Math.floor((elapsedSeconds % 3_600) / 60);
+    const seconds = elapsedSeconds % 60;
+    const clock = [minutes, seconds]
+      .map((value) => String(value).padStart(2, "0"))
+      .join(":");
+    return hours > 0 ? `${hours}:${clock}` : clock;
   }
 
   _setTextIfChanged(element, text) {
@@ -1202,6 +1384,9 @@ class NurserySootherCard extends HTMLElement {
       case "toggle-lock":
         this._toggleSwitch("lock_entity", "lock");
         break;
+      case "toggle-baseline-preview":
+        this._toggleSwitch("baseline_entity", "baseline-preview");
+        break;
       case "accept-recommendation":
         this._acceptRecommendation();
         break;
@@ -1296,7 +1481,8 @@ if (!window.customCards.some((card) => card.type === CARD_TAG)) {
   window.customCards.push({
     type: CARD_TAG,
     name: "Nursery Soother",
-    description: "Camera, state, exact levels, Automatic operation, and Level lock.",
+    description:
+      "Camera, session timer, Baseline preview, exact levels, Automatic operation, and Level lock.",
     preview: false,
     documentationURL:
       "https://github.com/ppiekars/nursery-soother#dashboard",

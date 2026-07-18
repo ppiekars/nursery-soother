@@ -517,6 +517,9 @@ async def test_start_recovers_configured_baseline_and_shared_sound(
     assert controller.automatic is False
     assert controller.state is SootherState.SOOTHING
     assert controller.recommendation is Recommendation.NONE
+    assert controller.status_attributes["session_started_at"] == (
+        "2026-07-11T12:00:00+00:00"
+    )
     assert _media_calls(calls, SERVICE_VOLUME_SET)[0].data[
         ATTR_MEDIA_VOLUME_LEVEL
     ] == pytest.approx(BASELINE_PERCENT / 100)
@@ -1041,6 +1044,7 @@ async def test_standby_stops_owned_playback_and_exact_level_starts_it(
     assert controller.level is SoothingLevel.STANDBY
     assert controller.state is SootherState.STANDBY
     assert controller.recommendation is Recommendation.START
+    assert controller.status_attributes["session_started_at"] is None
     assert controller.entry.options[CONF_LEVEL] == SoothingLevel.STANDBY.value
     assert len(_media_calls(calls, SERVICE_MEDIA_STOP)) == 1
 
@@ -1048,11 +1052,77 @@ async def test_standby_stops_owned_playback_and_exact_level_starts_it(
 
     assert controller.level is SoothingLevel.LEVEL_2
     assert controller.state is SootherState.SOOTHING
+    assert controller.status_attributes["session_started_at"] == (
+        "2026-07-11T12:00:00+00:00"
+    )
     assert controller.entry.options[CONF_LEVEL] == SoothingLevel.LEVEL_2.value
     assert _media_calls(calls, SERVICE_VOLUME_SET)[-1].data[
         ATTR_MEDIA_VOLUME_LEVEL
     ] == pytest.approx(LEVEL_2_PERCENT / 100)
     assert len(_media_calls(calls, SERVICE_PLAY_MEDIA)) == initial_play_count + 1
+
+
+async def test_baseline_preview_plays_in_standby_without_starting_session(
+    started_controller: tuple[NurserySootherController, RecordedCalls],
+) -> None:
+    """Independent Baseline playback leaves policy state and timer in Standby."""
+    controller, calls = started_controller
+    await controller.async_set_level(SoothingLevel.STANDBY)
+    play_count = len(_media_calls(calls, SERVICE_PLAY_MEDIA))
+    stop_count = len(_media_calls(calls, SERVICE_MEDIA_STOP))
+
+    await controller.async_set_baseline_preview(enabled=True)
+
+    assert controller.baseline_previewing is True
+    assert controller.level is SoothingLevel.STANDBY
+    assert controller.state is SootherState.STANDBY
+    assert controller.status_attributes["session_started_at"] is None
+    assert len(_media_calls(calls, SERVICE_PLAY_MEDIA)) == play_count + 1
+    assert _media_calls(calls, SERVICE_VOLUME_SET)[-1].data[
+        ATTR_MEDIA_VOLUME_LEVEL
+    ] == pytest.approx(BASELINE_PERCENT / 100)
+
+    await controller.async_set_baseline_preview(enabled=False)
+
+    assert controller.baseline_previewing is False
+    assert controller.level is SoothingLevel.STANDBY
+    assert controller.status_attributes["session_started_at"] is None
+    assert len(_media_calls(calls, SERVICE_MEDIA_STOP)) == stop_count + 1
+
+
+async def test_baseline_preview_cannot_run_beside_an_active_session(
+    started_controller: tuple[NurserySootherController, RecordedCalls],
+) -> None:
+    """The preview path never layers a second control mode onto a full session."""
+    controller, calls = started_controller
+    play_count = len(_media_calls(calls, SERVICE_PLAY_MEDIA))
+
+    with pytest.raises(ServiceValidationError):
+        await controller.async_set_baseline_preview(enabled=True)
+
+    assert controller.baseline_previewing is False
+    assert controller.level is SoothingLevel.BASELINE
+    assert len(_media_calls(calls, SERVICE_PLAY_MEDIA)) == play_count
+
+
+async def test_starting_session_adopts_running_baseline_preview(
+    started_controller: tuple[NurserySootherController, RecordedCalls],
+) -> None:
+    """Starting Baseline promotes preview playback into a timed full session."""
+    controller, calls = started_controller
+    await controller.async_set_level(SoothingLevel.STANDBY)
+    await controller.async_set_baseline_preview(enabled=True)
+    play_count = len(_media_calls(calls, SERVICE_PLAY_MEDIA))
+
+    await controller.async_set_level(SoothingLevel.BASELINE)
+
+    assert controller.baseline_previewing is False
+    assert controller.level is SoothingLevel.BASELINE
+    assert controller.state is SootherState.SOOTHING
+    assert controller.status_attributes["session_started_at"] == (
+        "2026-07-11T12:00:00+00:00"
+    )
+    assert len(_media_calls(calls, SERVICE_PLAY_MEDIA)) == play_count
 
 
 @pytest.mark.parametrize("initial_level", ACTIVE_LEVELS, ids=lambda level: level.value)

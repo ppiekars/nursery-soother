@@ -181,13 +181,15 @@ against a sleeping child or an unverified speaker.
    `/nursery_soother/nursery-soother-card.js` without a JavaScript or network
    error and without a manually configured dashboard resource.
 2. Choose **Add card > Nursery Soother** and confirm the visual editor exposes
-   `camera_entity`, `level_entity`, `automatic_entity`, `lock_entity`,
+   `camera_entity`, `level_entity`, `baseline_entity`, `automatic_entity`, `lock_entity`,
    `state_entity`, `recommendation_entity`, `attention_entity`, and the optional
    `camera_view` choice (`live`, `auto`, or `image`).
-3. Select the configured camera plus the six entities from the Nursery Soother
+3. Select the configured camera plus the seven entities from the Nursery Soother
    device. Save, reopen the editor, and confirm every selection and camera mode
    round-trips.
-4. Exercise all six exact level buttons and the Auto and Lock controls. Confirm
+4. Exercise all six exact level buttons, Baseline speaker control, and the Auto
+   and Lock controls. Confirm the camera timer runs only outside Standby and
+   Baseline-only playback leaves the level, policy, and timer in Standby. Confirm
    they call the corresponding native select or switch action and reflect
    entity-state updates from elsewhere in Home Assistant.
 5. Produce an `increase_level` recommendation with a valid `suggested_level`.

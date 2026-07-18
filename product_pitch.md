@@ -205,6 +205,7 @@ The integration creates standard entities similar to:
 select.nursery_soother_level
 switch.nursery_soother_automatic_operation
 switch.nursery_soother_level_lock
+switch.nursery_soother_baseline_sound_preview
 sensor.nursery_soother_state
 sensor.nursery_soother_recommendation
 binary_sensor.nursery_soother_attention_required

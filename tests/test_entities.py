@@ -25,6 +25,7 @@ from custom_components.nursery_soother import sensor as sensor_platform
 from custom_components.nursery_soother import switch as switch_platform
 from custom_components.nursery_soother.const import (
     CONF_AUTOMATIC_OPERATION,
+    CONF_BASELINE_PREVIEW,
     CONF_BASELINE_VOLUME,
     CONF_LEVEL,
     CONF_LEVEL_1_VOLUME,
@@ -51,7 +52,7 @@ if TYPE_CHECKING:
     from homeassistant.helpers.entity import Entity
 
 PERCENTAGE_MAX = 100
-ENTITY_COUNT = 13
+ENTITY_COUNT = 14
 
 
 @dataclass
@@ -70,6 +71,7 @@ class _FakeController:
     def __init__(self) -> None:
         self.level = SoothingLevel.STANDBY
         self.automatic = False
+        self.baseline_previewing = False
         self.locked = False
         self.state = SootherState.STANDBY
         self.recommendation = Recommendation.START
@@ -127,6 +129,12 @@ class _FakeController:
         self.locked = locked
         self.emit()
 
+    async def async_set_baseline_preview(self, *, enabled: bool) -> None:
+        """Record and apply an independent Baseline playback change."""
+        self.calls.append((CONF_BASELINE_PREVIEW, enabled))
+        self.baseline_previewing = enabled
+        self.emit()
+
     async def async_simulate_cry_event(self) -> None:
         """Record one synthetic cry event."""
         self.calls.append((SERVICE_SIMULATE_CRY_EVENT, None))
@@ -180,7 +188,7 @@ async def test_shared_metadata_availability_and_listener_lifecycle(
     entry: MockConfigEntry,
     controller: _FakeController,
 ) -> None:
-    """The thirteen entities share stable metadata and observable updates."""
+    """The fourteen entities share stable metadata and observable updates."""
     entities = await _all_entities(hass, entry)
 
     expected_keys = {
@@ -189,6 +197,7 @@ async def test_shared_metadata_availability_and_listener_lifecycle(
         "attention_required",
         CONF_LEVEL,
         CONF_AUTOMATIC_OPERATION,
+        CONF_BASELINE_PREVIEW,
         CONF_LEVEL_LOCK,
         SERVICE_SIMULATE_CRY_EVENT,
         CONF_BASELINE_VOLUME,
@@ -300,6 +309,28 @@ async def test_level_lock_switch_delegates_to_controller(
     assert controller.calls == [
         (CONF_LEVEL_LOCK, True),
         (CONF_LEVEL_LOCK, False),
+    ]
+
+
+async def test_baseline_preview_switch_delegates_without_changing_level(
+    hass: HomeAssistant,
+    entry: MockConfigEntry,
+    controller: _FakeController,
+) -> None:
+    """Baseline preview is an independent playback control."""
+    entities: list[switch_platform.NurserySootherBaselinePreviewSwitch] = []
+    await switch_platform.async_setup_entry(hass, entry, entities.extend)
+    preview = entities[2]
+
+    assert preview.entity_description.translation_key == "baseline_preview"
+    assert preview.entity_category is None
+    assert preview.is_on is False
+    await preview.async_turn_on()
+    await preview.async_turn_off()
+    assert controller.level is SoothingLevel.STANDBY
+    assert controller.calls == [
+        (CONF_BASELINE_PREVIEW, True),
+        (CONF_BASELINE_PREVIEW, False),
     ]
 
 

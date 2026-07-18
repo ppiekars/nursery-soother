@@ -246,6 +246,7 @@ than depend on a copied sample ID.
 | `select` | Exact output: Standby, Baseline, or Level 1–4 | `select.select_option` |
 | `switch` | Allow or prevent automatic upward level changes | `switch.turn_on`, `switch.turn_off` |
 | `switch` | Freeze policy-driven changes at the current level | `switch.turn_on`, `switch.turn_off` |
+| `switch` | Play or stop Baseline sound while the system remains in Standby | `switch.turn_on`, `switch.turn_off` |
 | `sensor` | Current policy phase | Read-only |
 | `sensor` | Current recommendation and exact suggested next level | Read-only |
 | `binary_sensor` | Whether caregiver attention is required | Read-only |
@@ -355,8 +356,9 @@ notifications](https://companion.home-assistant.io/docs/notifications/actionable
 ## Dashboard
 
 Nursery Soother ships an optional `custom:nursery-soother-card` that combines
-the nursery camera, policy status, recommendation, attention state, exact level
-control, Automatic operation, and Level lock. When Home Assistant's frontend is
+the nursery camera, elapsed session time, independent Baseline playback, policy
+status, recommendation, attention state, exact level control, Automatic
+operation, and Level lock. When Home Assistant's frontend is
 available, the integration serves and loads the card module automatically from
 `/nursery_soother/nursery-soother-card.js`; do not add a separate dashboard
 resource. On Home Assistant 2026.7 or newer, choose **Add card > Nursery
@@ -369,6 +371,7 @@ Manual YAML uses these keys:
 | `type` | Yes | `custom:nursery-soother-card` |
 | `camera_entity` | Yes | Configured nursery `camera` |
 | `level_entity` | Yes | Nursery Soother level `select` |
+| `baseline_entity` | Yes | Baseline sound preview `switch` |
 | `automatic_entity` | Yes | Automatic operation `switch` |
 | `lock_entity` | Yes | Level lock `switch` |
 | `state_entity` | Yes | Policy-state `sensor` |
@@ -380,6 +383,7 @@ Manual YAML uses these keys:
 type: custom:nursery-soother-card
 camera_entity: camera.nursery
 level_entity: select.nursery_soother_level
+baseline_entity: switch.nursery_soother_baseline_sound_preview
 automatic_entity: switch.nursery_soother_automatic_operation
 lock_entity: switch.nursery_soother_level_lock
 state_entity: sensor.nursery_soother_state
@@ -392,6 +396,9 @@ The six level buttons call `select.select_option` for Standby, Baseline, or an
 exact Level 1–4. The **Auto** and **Lock** controls call `switch.turn_on` or
 `switch.turn_off` from the current switch state, and **Set** applies the exact
 level exposed in the recommendation sensor's `suggested_level` attribute.
+The camera timer runs from the active session's start and resets in Standby.
+The speaker control toggles Baseline playback independently while Standby is
+selected, so it does not start a session, the response policy, or the timer.
 `live` and `auto` use Home Assistant's picture-entity camera behavior, while
 `image` refreshes the authenticated camera snapshot every 10 seconds. Tapping
 any camera view opens the standard camera more-info dialog. When attention is
@@ -401,7 +408,7 @@ Volume numbers and **Simulate cry event** remain available through native
 entity cards and the device page rather than this compact card.
 
 Entity IDs are registry data and can be renamed. Select the configured camera
-and the six entities shown on the Nursery Soother device page instead of
+and the seven entities shown on the Nursery Soother device page instead of
 relying on the sample IDs above. If an entity is renamed after the card is
 configured, update that field in the visual editor or YAML. A complete starting
 view is available in

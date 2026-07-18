@@ -112,6 +112,7 @@
       const ids = {
         camera: "camera.nursery",
         level: "select.nursery_soother_level",
+        baseline: "switch.nursery_soother_baseline_sound_preview",
         automatic: "switch.nursery_soother_automatic_operation",
         lock: "switch.nursery_soother_level_lock",
         state: "sensor.nursery_soother_state",
@@ -126,9 +127,14 @@
           attributes: { friendly_name: "Nursery camera", entity_picture: picture },
         },
         [ids.level]: { entity_id: ids.level, state: "level_1", attributes: {} },
+        [ids.baseline]: { entity_id: ids.baseline, state: "off", attributes: {} },
         [ids.automatic]: { entity_id: ids.automatic, state: "off", attributes: {} },
         [ids.lock]: { entity_id: ids.lock, state: "off", attributes: {} },
-        [ids.state]: { entity_id: ids.state, state: "cry_pending", attributes: {} },
+        [ids.state]: {
+          entity_id: ids.state,
+          state: "cry_pending",
+          attributes: { session_started_at: new Date(Date.now() - 83_000).toISOString() },
+        },
         [ids.recommendation]: {
           entity_id: ids.recommendation,
           state: "increase_level",
@@ -148,8 +154,22 @@
             log.textContent = JSON.stringify({ domain, service, data }, null, 2);
             states = { ...states };
             if (domain === "select") {
+              const wasStandby = states[ids.level].state === "standby";
               states[ids.level] = { ...states[ids.level], state: data.option };
-              states[ids.state] = { ...states[ids.state], state: "soothing" };
+              states[ids.baseline] = { ...states[ids.baseline], state: "off" };
+              states[ids.state] = {
+                ...states[ids.state],
+                state: data.option === "standby" ? "standby" : "soothing",
+                attributes: {
+                  ...states[ids.state].attributes,
+                  session_started_at:
+                    data.option === "standby"
+                      ? null
+                      : wasStandby
+                        ? new Date().toISOString()
+                        : states[ids.state].attributes.session_started_at,
+                },
+              };
               states[ids.recommendation] = {
                 ...states[ids.recommendation],
                 state: "none",
@@ -175,6 +195,7 @@
       card.setConfig({
         camera_entity: ids.camera,
         level_entity: ids.level,
+        baseline_entity: ids.baseline,
         automatic_entity: ids.automatic,
         lock_entity: ids.lock,
         state_entity: ids.state,

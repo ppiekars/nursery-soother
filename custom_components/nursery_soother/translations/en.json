@@ -147,6 +147,9 @@
       },
       "level_lock": {
         "name": "Level lock"
+      },
+      "baseline_preview": {
+        "name": "Baseline sound preview"
       }
     },
     "sensor": {
@@ -251,6 +254,12 @@
     },
     "level_change_failed": {
       "message": "The nursery speaker could not apply the selected soothing level. Check the speaker and try again."
+    },
+    "baseline_preview_active": {
+      "message": "Baseline sound preview is available only while Nursery Soother is in Standby."
+    },
+    "baseline_preview_failed": {
+      "message": "The nursery speaker could not apply Baseline sound preview. Check the speaker and try again."
     }
   }
 }

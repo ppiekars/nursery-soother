@@ -54,6 +54,7 @@ const Card = registry.get("nursery-soother-card");
 const defaultConfig = {
   camera_entity: "camera.nursery",
   level_entity: "select.nursery_soother_level",
+  baseline_entity: "switch.nursery_soother_baseline_sound_preview",
   automatic_entity: "switch.nursery_soother_automatic_operation",
   lock_entity: "switch.nursery_soother_level_lock",
   state_entity: "sensor.nursery_soother_state",
@@ -83,6 +84,7 @@ test("registers the card, metadata, and built-in form schema", () => {
     [
       "camera_entity",
       "level_entity",
+      "baseline_entity",
       "automatic_entity",
       "lock_entity",
       "state_entity",
@@ -130,6 +132,43 @@ test("keeps attention guidance valid when an active level is still selected", ()
   const card = configuredCard();
   assert.match(card.shadowRoot.html, /Attention needed — check child and devices/);
   assert.doesNotMatch(card.shadowRoot.html, /reset to Standby/);
+  assert.match(card.shadowRoot.html, /class="camera-timer"/);
+  assert.match(card.shadowRoot.html, /class="speaker-button"/);
+});
+
+test("renders elapsed session time and resets it in Standby", () => {
+  const card = configuredCard();
+  const classes = new Set();
+  const timer = {
+    textContent: "00:00",
+    attributes: {},
+    classList: {
+      toggle: (name, enabled) =>
+        enabled ? classes.add(name) : classes.delete(name),
+    },
+    setAttribute: (name, value) => {
+      timer.attributes[name] = value;
+    },
+  };
+  card.shadowRoot.querySelector = () => timer;
+  const originalNow = Date.now;
+  Date.now = () => Date.parse("2026-07-11T13:02:03+00:00");
+
+  card._updateSessionTimer(
+    { state: "level_2" },
+    {
+      attributes: { session_started_at: "2026-07-11T12:00:00+00:00" },
+    },
+  );
+  assert.equal(timer.textContent, "1:02:03");
+  assert.equal(timer.attributes.datetime, "PT3723S");
+  assert.equal(classes.has("is-active"), true);
+
+  card._updateSessionTimer({ state: "standby" }, { attributes: {} });
+  assert.equal(timer.textContent, "00:00");
+  assert.equal(timer.attributes.datetime, "PT0S");
+  assert.equal(classes.has("is-active"), false);
+  Date.now = originalNow;
 });
 
 test("does not rewrite unchanged live-region text", () => {
@@ -161,6 +200,7 @@ test("maps exact levels, suggestions, and switch toggles to native services", as
   card._hass = {
     states: {
       [defaultConfig.level_entity]: { state: "baseline", attributes: {} },
+      [defaultConfig.baseline_entity]: { state: "off", attributes: {} },
       [defaultConfig.automatic_entity]: { state: "off", attributes: {} },
       [defaultConfig.lock_entity]: { state: "on", attributes: {} },
       [defaultConfig.recommendation_entity]: {
@@ -172,6 +212,8 @@ test("maps exact levels, suggestions, and switch toggles to native services", as
   };
 
   card._selectLevel("level_2");
+  await settleAction(card);
+  card._toggleSwitch("baseline_entity", "baseline-preview");
   await settleAction(card);
   card._toggleSwitch("automatic_entity", "automatic");
   await settleAction(card);
@@ -185,6 +227,11 @@ test("maps exact levels, suggestions, and switch toggles to native services", as
       "select",
       "select_option",
       { entity_id: defaultConfig.level_entity, option: "level_2" },
+    ],
+    [
+      "switch",
+      "turn_on",
+      { entity_id: defaultConfig.baseline_entity },
     ],
     [
       "switch",

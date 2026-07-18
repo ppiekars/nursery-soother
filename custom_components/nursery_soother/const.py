@@ -6,6 +6,7 @@ from homeassistant.const import Platform
 
 CONF_ATTENTION_SECONDS = "attention_seconds"
 CONF_AUTOMATIC_OPERATION = "automatic_operation"
+CONF_BASELINE_PREVIEW = "baseline_preview"
 CONF_BASELINE_SOUND = "baseline_sound"
 CONF_BASELINE_VOLUME = "baseline_volume"
 CONF_CAMERA = "camera"

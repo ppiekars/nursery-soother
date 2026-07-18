@@ -124,7 +124,7 @@ custom_components/nursery_soother/
 ├── frontend/
 │   └── nursery-soother-card.js  # optional Lovelace card and visual editor
 ├── select.py            # exact Standby/Baseline/Level 1–4 control
-├── switch.py            # Automatic operation and Level lock controls
+├── switch.py            # Automatic, Level lock, and Baseline preview controls
 ├── sensor.py            # policy-state and recommendation sensors
 ├── binary_sensor.py     # attention-required indicator
 ├── number.py            # five level volumes and Maximum
@@ -160,13 +160,14 @@ registry references:
 | --- | --- | --- |
 | `camera_entity` | `camera` | Camera image/stream and more-info target |
 | `level_entity` | `select` | Exact Standby, Baseline, or Level 1–4 control |
+| `baseline_entity` | `switch` | Baseline-only playback while in Standby |
 | `automatic_entity` | `switch` | Automatic operation control |
 | `lock_entity` | `switch` | Level lock control |
 | `state_entity` | `sensor` | Current policy phase |
 | `recommendation_entity` | `sensor` | Recommendation and `suggested_level` |
 | `attention_entity` | `binary_sensor` | Direct-care attention state |
 
-All seven keys are required. Optional `camera_view` accepts `live` (the
+All eight keys are required. Optional `camera_view` accepts `live` (the
 default), `auto`, or `image`. `getConfigForm` exposes the same schema through
 the visual editor on the supported Home Assistant 2026.7 baseline.
 `getStubConfig` defaults only the camera mode and deliberately leaves every
@@ -176,8 +177,8 @@ rename therefore requires updating the Lovelace config.
 
 The card reads state from those entities and invokes only standard Home
 Assistant select and switch actions. Its six level controls select exact
-options with `select.select_option`, Auto and Lock call `switch.turn_on` or
-`switch.turn_off`, and a valid recommendation can select its exact
+options with `select.select_option`; Baseline preview, Auto, and Lock call
+`switch.turn_on` or `switch.turn_off`; and a valid recommendation can select its exact
 `suggested_level`. `live` and `auto` delegate rendering to a native
 picture-entity card and fall back to an authenticated snapshot; `image` uses
 that snapshot directly and refreshes it every 10 seconds. Camera taps open Home

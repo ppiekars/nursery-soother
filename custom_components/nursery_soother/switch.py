@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 
 from homeassistant.components.switch import SwitchEntity, SwitchEntityDescription
 
-from .const import CONF_AUTOMATIC_OPERATION, CONF_LEVEL_LOCK
+from .const import CONF_AUTOMATIC_OPERATION, CONF_BASELINE_PREVIEW, CONF_LEVEL_LOCK
 from .entity import NurserySootherEntity
 
 if TYPE_CHECKING:
@@ -25,6 +25,10 @@ LEVEL_LOCK_DESCRIPTION = SwitchEntityDescription(
     key=CONF_LEVEL_LOCK,
     translation_key="level_lock",
 )
+BASELINE_PREVIEW_DESCRIPTION = SwitchEntityDescription(
+    key=CONF_BASELINE_PREVIEW,
+    translation_key="baseline_preview",
+)
 
 
 async def async_setup_entry(
@@ -35,7 +39,11 @@ async def async_setup_entry(
     """Set up the Nursery Soother operating-mode controls."""
     del hass
     async_add_entities(
-        [NurserySootherAutomaticSwitch(entry), NurserySootherLevelLockSwitch(entry)]
+        [
+            NurserySootherAutomaticSwitch(entry),
+            NurserySootherLevelLockSwitch(entry),
+            NurserySootherBaselinePreviewSwitch(entry),
+        ]
     )
 
 
@@ -93,3 +101,31 @@ class NurserySootherLevelLockSwitch(NurserySootherEntity, SwitchEntity):
         """Allow the response policy to change levels again."""
         del kwargs
         await self._controller.async_set_locked(locked=False)
+
+
+class NurserySootherBaselinePreviewSwitch(NurserySootherEntity, SwitchEntity):
+    """Play Baseline independently while the soothing system remains in Standby."""
+
+    entity_description = BASELINE_PREVIEW_DESCRIPTION
+
+    def __init__(
+        self,
+        entry: ConfigEntry[NurserySootherController],
+    ) -> None:
+        """Initialize the independent Baseline playback switch."""
+        super().__init__(entry, BASELINE_PREVIEW_DESCRIPTION)
+
+    @property
+    def is_on(self) -> bool:
+        """Return whether independent Baseline playback is active."""
+        return self._controller.baseline_previewing
+
+    async def async_turn_on(self, **kwargs: object) -> None:
+        """Start Baseline playback without starting a soothing session."""
+        del kwargs
+        await self._controller.async_set_baseline_preview(enabled=True)
+
+    async def async_turn_off(self, **kwargs: object) -> None:
+        """Stop independent Baseline playback."""
+        del kwargs
+        await self._controller.async_set_baseline_preview(enabled=False)

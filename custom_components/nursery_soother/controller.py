@@ -193,6 +193,7 @@ class NurserySootherController:
         self._confirmed_at: datetime | None = None
         self._last_cry_activity_at: datetime | None = None
         self._last_level_change_at: datetime | None = None
+        self._session_started_at: datetime | None = None
         self._stage_simulated_events = 0
         self._evidence = CryEvidence(self.settings.evidence_window_seconds)
         self._last_error: str | None = None
@@ -208,6 +209,7 @@ class NurserySootherController:
         self._cancel_attention: CALLBACK_TYPE | None = None
         self._timer_deadlines: dict[str, datetime] = {}
         self._dependency_issues: set[str] = set()
+        self._baseline_previewing = False
         self._owns_playback = False
         self._playback_interrupted = False
         self._owned_media_content_id: str | None = None
@@ -246,6 +248,11 @@ class NurserySootherController:
     def locked(self) -> bool:
         """Return whether policy-driven level changes are frozen."""
         return self.settings.level_lock
+
+    @property
+    def baseline_previewing(self) -> bool:
+        """Return whether Baseline is playing outside an active session."""
+        return self._baseline_previewing
 
     @property
     def suggested_level(self) -> SoothingLevel | None:
@@ -295,6 +302,7 @@ class NurserySootherController:
             "level": self.level,
             "automatic_operation": self.automatic,
             "level_locked": self.locked,
+            "baseline_previewing": self.baseline_previewing,
             "enabled": self.enabled,
             "configured": self.configured,
             "dependencies_available": self.dependencies_available,
@@ -353,6 +361,11 @@ class NurserySootherController:
         }
         next_countdown = next(iter(countdowns), None)
         return {
+            "session_started_at": (
+                self._session_started_at.isoformat()
+                if self.enabled and self._session_started_at is not None
+                else None
+            ),
             "explanation": self._policy_explanation(
                 now,
                 evidence,
@@ -421,6 +434,7 @@ class NurserySootherController:
         self._dependency_issues = self._find_dependency_issues()
 
         if not self.configured:
+            self._session_started_at = None
             self.settings.level = SoothingLevel.STANDBY
             self._persist_settings()
             self._transition(
@@ -431,6 +445,7 @@ class NurserySootherController:
             return
 
         if not self.enabled:
+            self._session_started_at = None
             self._transition(
                 SootherState.STANDBY, Recommendation.START, "standby startup"
             )
@@ -447,6 +462,7 @@ class NurserySootherController:
 
         if self._media_player_is_active():
             self._playback_interrupted = True
+            self._session_started_at = None
             self.settings.level = SoothingLevel.STANDBY
             self._persist_settings()
             self._transition(
@@ -457,7 +473,9 @@ class NurserySootherController:
             await self._async_notify_playback_replaced()
             return
 
+        self._session_started_at = dt_util.utcnow()
         if not await self._async_ensure_playback():
+            self._session_started_at = None
             return
         self._transition(
             SootherState.SOOTHING,
@@ -475,6 +493,7 @@ class NurserySootherController:
             stopped = await self._async_stop_playback()
             if not stopped or self._failed_play_context_ids:
                 return False
+            self._baseline_previewing = False
             self._stop_runtime_work()
             return stopped
 
@@ -707,11 +726,80 @@ class NurserySootherController:
                 return
             await self._async_set_active_level(requested)
 
+    async def async_set_baseline_preview(self, *, enabled: bool) -> None:
+        """Toggle Baseline playback without starting a soothing session."""
+        async with self._lock:
+            self._ensure_started()
+            requested = bool(enabled)
+            if requested == self._baseline_previewing:
+                return
+            if requested:
+                if self.enabled:
+                    raise ServiceValidationError(
+                        translation_domain=DOMAIN,
+                        translation_key="baseline_preview_active",
+                    )
+                if self._failed_play_context_ids:
+                    raise ServiceValidationError(
+                        translation_domain=DOMAIN,
+                        translation_key="playback_settling",
+                    )
+                if (
+                    self.media_player is None
+                    or self._media_for_level(SoothingLevel.BASELINE) is None
+                ):
+                    raise ServiceValidationError(
+                        translation_domain=DOMAIN,
+                        translation_key="not_configured",
+                    )
+                if not self._media_player_available():
+                    raise ServiceValidationError(
+                        translation_domain=DOMAIN,
+                        translation_key="devices_unavailable",
+                    )
+                if not await self._async_prepare_explicit_sonos_takeover():
+                    raise HomeAssistantError(
+                        translation_domain=DOMAIN,
+                        translation_key="baseline_preview_failed",
+                    )
+                self._baseline_previewing = True
+                if await self._async_ensure_playback():
+                    self._emit_update()
+                    return
+                self._baseline_previewing = False
+                self._emit_update()
+                raise HomeAssistantError(
+                    translation_domain=DOMAIN,
+                    translation_key="baseline_preview_failed",
+                )
+
+            if not await self._async_stop_playback():
+                raise HomeAssistantError(
+                    translation_domain=DOMAIN,
+                    translation_key="baseline_preview_failed",
+                )
+            self._baseline_previewing = False
+            self._playback_interrupted = False
+            self._emit_update()
+
     async def _async_set_active_level(self, requested: SoothingLevel) -> None:
         """Validate and apply one active level while the public lock is held."""
         previous_level = self.level
         self._validate_active_level_request()
-        previous_media = self._media_for_level(previous_level)
+        preview_was_active = self._baseline_previewing
+        previous_media = self._media_for_level(
+            SoothingLevel.BASELINE if preview_was_active else previous_level
+        )
+        if preview_was_active and not await self._async_playback_is_owned_now(
+            notify_interruption=False
+        ):
+            self._baseline_previewing = False
+            self._playback_interrupted = False
+            self._emit_update()
+            raise ServiceValidationError(
+                translation_domain=DOMAIN,
+                translation_key="playback_settling",
+            )
         if self.enabled and not await self._async_playback_is_owned_now(
             notify_interruption=False
         ):
@@ -725,6 +813,7 @@ class NurserySootherController:
                 )
         if (
             previous_level is SoothingLevel.STANDBY
+            and not preview_was_active
             and not await self._async_prepare_explicit_sonos_takeover()
         ):
             self._transition(
@@ -738,6 +827,7 @@ class NurserySootherController:
                 translation_key="level_change_failed",
             )
         self.settings.level = requested
+        self._baseline_previewing = False
         now = dt_util.utcnow()
         if not await self._async_apply_level(previous_media):
             self._restore_level_after_failed_effect(previous_level)
@@ -803,6 +893,7 @@ class NurserySootherController:
     ) -> None:
         """Initialize a fresh session after leaving Standby."""
         self._new_episode()
+        self._session_started_at = now
         self._transition(
             SootherState.SOOTHING,
             Recommendation.NONE,
@@ -972,6 +1063,8 @@ class NurserySootherController:
             )
             await self._async_notify_dependency_problem()
             return
+        self._baseline_previewing = False
+        self._session_started_at = None
         self.settings.level = SoothingLevel.STANDBY
         self._persist_settings()
         self._new_episode()
@@ -1035,6 +1128,8 @@ class NurserySootherController:
             if self._owns_playback and not self._playback_interrupted
             else SoothingLevel.STANDBY
         )
+        if self.settings.level is SoothingLevel.STANDBY:
+            self._session_started_at = None
         self._persist_settings()
         self._emit_update()
 
@@ -1053,20 +1148,51 @@ class NurserySootherController:
             new_issues = self._find_dependency_issues()
             self._dependency_issues = new_issues
 
+            if await self._async_handle_baseline_preview_state_change(
+                entity_id, event, new_issues
+            ):
+                return
+
             if await self._async_handle_dependency_change(old_issues, new_issues):
                 return
 
-            if not self.enabled:
-                return
-            if self._playback_interrupted:
-                return
+            await self._async_handle_active_session_state_change(entity_id, event)
 
-            if entity_id == self.cry_sensor:
-                await self._async_handle_cry_state_changed(event)
-            elif entity_id == self.media_player:
+    async def _async_handle_baseline_preview_state_change(
+        self,
+        entity_id: str,
+        event: Event[EventStateChangedData],
+        dependency_issues: set[str],
+    ) -> bool:
+        """Consume speaker events that belong to independent Baseline playback."""
+        if not self._baseline_previewing:
+            return False
+        if entity_id == self.media_player:
+            if CONF_MEDIA_PLAYER in dependency_issues:
+                self._baseline_previewing = False
+                self._clear_playback_ownership()
+                self._playback_interrupted = False
+                self._emit_update()
+            else:
                 await self._async_handle_media_state_changed(event)
-            elif entity_id == self._sonos_crossfade_entity_id():
-                await self._async_handle_native_loop_control_changed()
+            return True
+        if entity_id == self._sonos_crossfade_entity_id():
+            await self._async_handle_native_loop_control_changed()
+            return True
+        return False
+
+    async def _async_handle_active_session_state_change(
+        self, entity_id: str, event: Event[EventStateChangedData]
+    ) -> None:
+        """Route dependency events that can affect an active soothing session."""
+        if self._baseline_previewing or not self.enabled or self._playback_interrupted:
+            return
+        if entity_id == self.cry_sensor:
+            await self._async_handle_cry_state_changed(event)
+        elif entity_id == self.media_player:
+            await self._async_handle_media_state_changed(event)
+        elif entity_id == self._sonos_crossfade_entity_id():
+            await self._async_handle_native_loop_control_changed()
 
     async def _async_handle_cry_state_changed(
         self, event: Event[EventStateChangedData]
@@ -1098,6 +1224,11 @@ class NurserySootherController:
     ) -> None:
         """Guard owned playback and fail safe on an external takeover."""
         if self._media_was_replaced(event):
+            if self._baseline_previewing:
+                self._baseline_previewing = False
+                self._playback_interrupted = False
+                self._emit_update()
+                return
             await self._async_finalize_playback_interruption()
             return
         if self._native_loop_active and not self._native_loop_controls_are_current():
@@ -1157,7 +1288,14 @@ class NurserySootherController:
         ):
             return
         self._last_error = "native_loop_controls_changed"
-        await self._async_stop_playback()
+        stopped = await self._async_stop_playback()
+        if self._baseline_previewing:
+            if stopped:
+                self._baseline_previewing = False
+                self._playback_interrupted = False
+            self._emit_update()
+            return
+        self._session_started_at = None
         self.settings.level = SoothingLevel.STANDBY
         self._persist_settings()
         self._new_episode()
@@ -1170,6 +1308,11 @@ class NurserySootherController:
 
     async def _async_handle_playback_recovery_failure(self, reason: str) -> None:
         """Expose a failed restart instead of claiming silent soothing."""
+        if self._baseline_previewing:
+            self._baseline_previewing = False
+            self._playback_interrupted = False
+            self._emit_update()
+            return
         if self.state is SootherState.ATTENTION_REQUIRED:
             return
         self._transition(
@@ -1525,6 +1668,7 @@ class NurserySootherController:
         stopped = await self._async_stop_playback()
         self._new_episode()
         if stopped:
+            self._session_started_at = None
             self.settings.level = SoothingLevel.STANDBY
             self._persist_settings()
         self._transition(
@@ -1911,6 +2055,7 @@ class NurserySootherController:
                     )
                     await self._async_notify_dependency_problem()
                     return
+                self._session_started_at = None
                 self.settings.level = SoothingLevel.STANDBY
                 self._persist_settings()
                 self._episode += 1
@@ -2190,13 +2335,14 @@ class NurserySootherController:
     async def _async_ensure_playback(self) -> bool:
         """Set a capped volume and start either native looping or direct media."""
         media_player = self.media_player
+        playback_level = self._playback_level()
         if (
-            not self.enabled
+            playback_level is None
             or media_player is None
             or not self._entity_available(media_player)
         ):
             return False
-        target = self.settings.volume_for_level(self.level)
+        target = self.settings.volume_for_level(playback_level)
         if not await self._async_set_speaker_volume(target, require_owned=False):
             if self._native_loop_settings is not None:
                 await self._async_cleanup_native_loop(
@@ -2206,7 +2352,7 @@ class NurserySootherController:
             self._playback_interrupted = True
             return False
 
-        media = self._media_for_level(self.level)
+        media = self._media_for_level(playback_level)
         if media is None:
             if self._native_loop_settings is not None:
                 await self._async_cleanup_native_loop(
@@ -2806,6 +2952,8 @@ class NurserySootherController:
         self._episode += 1
         self._incident_active = False
         self._episode_confirmed = False
+        self._baseline_previewing = False
+        self._session_started_at = None
         self.settings.level = SoothingLevel.STANDBY
         self._persist_settings()
         self._transition(
@@ -3114,7 +3262,12 @@ class NurserySootherController:
 
     def _configured_media_content_id(self) -> str | None:
         """Return the source identifier for the selected active level."""
-        media = self._media_for_level(self.level)
+        playback_level = self._playback_level()
+        media = (
+            self._media_for_level(playback_level)
+            if playback_level is not None
+            else None
+        )
         if media is None:
             return None
         content_id = media.get(ATTR_MEDIA_CONTENT_ID)
@@ -3125,6 +3278,14 @@ class NurserySootherController:
         if level is SoothingLevel.STANDBY:
             return None
         return self.sounds.get(level)
+
+    def _playback_level(self) -> SoothingLevel | None:
+        """Return the level whose media is currently owned by the integration."""
+        if self.enabled:
+            return self.level
+        if self._baseline_previewing:
+            return SoothingLevel.BASELINE
+        return None
 
     def _media_content_id_matches_configured(
         self, media_content_id: object

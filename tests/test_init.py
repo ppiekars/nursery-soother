@@ -92,7 +92,7 @@ CONFIG_DATA = ENTITY_DATA | {
         "notify.mobile_app_parent_two",
     ],
 }
-ENTITY_COUNT = 13
+ENTITY_COUNT = 14
 PREVIOUS_ENTRY_VERSION = 6
 TOGGLE_TRIGGERS = [{"platform": "event", "event_type": "nursery_soother_toggle"}]
 INCREASE_LEVEL_TRIGGERS = [
@@ -187,7 +187,7 @@ async def test_frontend_registration_failure_keeps_integration_available(
 
 
 async def test_v7_standby_setup_reload_and_unload(hass: HomeAssistant) -> None:
-    """A clean entry exposes all thirteen entities and remains safely off."""
+    """A clean entry exposes all fourteen entities and remains safely off."""
     entry = MockConfigEntry(
         domain=DOMAIN,
         title=NAME,
