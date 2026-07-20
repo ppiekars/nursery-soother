@@ -8,6 +8,7 @@ import secrets
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import timedelta
+from math import isfinite
 from typing import TYPE_CHECKING, Any, TypeGuard
 from urllib.parse import parse_qsl, unquote, urlsplit
 
@@ -68,6 +69,7 @@ from homeassistant.util import dt as dt_util
 from .const import (
     ACTION_SET_LEVEL,
     ACTION_SET_MANUAL,
+    ATTENTION_MINUTES_STEP,
     CONF_BASELINE_VOLUME,
     CONF_CAMERA,
     CONF_CRY_SENSOR,
@@ -84,7 +86,9 @@ from .const import (
     CONF_TOGGLE_TRIGGERS,
     DOMAIN,
     EVENT_NOTIFICATION_ACTION,
+    MAX_ATTENTION_MINUTES,
     MAX_VOLUME_PERCENT,
+    MIN_ATTENTION_MINUTES,
     NOTIFICATION_ACTION_PREFIX,
     NOTIFICATION_TAG_PREFIX,
 )
@@ -1050,6 +1054,26 @@ class NurserySootherController:
                 await self._async_set_speaker_volume(
                     self.settings.volume_for_level(self.level)
                 )
+            self._emit_update()
+
+    async def async_set_attention_minutes(self, value: float) -> None:
+        """Persist the attention deadline in minutes for future episodes."""
+        async with self._lock:
+            self._ensure_started()
+            minutes = float(value)
+            if (
+                not isfinite(minutes)
+                or not MIN_ATTENTION_MINUTES <= minutes <= MAX_ATTENTION_MINUTES
+                or not (minutes / ATTENTION_MINUTES_STEP).is_integer()
+            ):
+                raise ServiceValidationError(
+                    translation_domain=DOMAIN,
+                    translation_key="invalid_attention_minutes",
+                )
+            self.settings.attention_seconds = round(minutes * 60)
+            self._persist_settings()
+            # A confirmed episode owns one immutable base deadline. This value
+            # applies when the next episode schedules its attention timer.
             self._emit_update()
 
     async def _async_enter_standby(self, reason: str) -> None:
@@ -2399,38 +2423,8 @@ class NurserySootherController:
             )
             return False
 
-        crossfade_state = self.hass.states.get(crossfade_entity_id)
-        if crossfade_state is None:
-            await self._async_cleanup_native_loop(clear_queue=False, end_session=True)
-            return False
-        if crossfade_state.state == STATE_OFF:
-            self._native_loop_force_restore = True
-            crossfade_enabled = await self._async_call_entity(
-                Platform.SWITCH,
-                SERVICE_TURN_ON,
-                crossfade_entity_id,
-                {},
-            ) and await self._async_refresh_entity(
-                crossfade_entity_id, expected_state=STATE_ON
-            )
-            if not crossfade_enabled:
-                self._last_error = "native_crossfade_not_confirmed"
-                if await self._async_native_queue_can_be_replaced():
-                    await self._async_cleanup_native_loop(
-                        clear_queue=False, end_session=True
-                    )
-                await self._async_handle_playback_recovery_failure(
-                    "Sonos crossfade could not be confirmed"
-                )
-                return False
-            self._native_loop_force_restore = False
-
-        if not await self._async_native_queue_can_be_replaced():
-            await self._async_handle_playback_recovery_failure(
-                "speaker takeover during Sonos queue setup"
-            )
-            return False
-
+        # Inactive external transports such as Spotify Connect can reject Sonos
+        # play-mode changes. Establish our queue transport before crossfade/repeat.
         if not await self._async_call_media(SERVICE_CLEAR_PLAYLIST, {}):
             await self._async_cleanup_native_loop(clear_queue=False, end_session=True)
             return False
@@ -2451,6 +2445,49 @@ class NurserySootherController:
 
         if not await self._async_wait_for_owned_playback():
             await self._async_handle_unconfirmed_native_playback()
+            return False
+
+        if not await self._async_refresh_entity(crossfade_entity_id):
+            self._last_error = "native_crossfade_refresh_failed"
+            await self._async_stop_playback()
+            return False
+        crossfade_state = self.hass.states.get(crossfade_entity_id)
+        if crossfade_state is None or crossfade_state.state not in {
+            STATE_OFF,
+            STATE_ON,
+        }:
+            self._last_error = "native_crossfade_loop_unavailable"
+            await self._async_stop_playback()
+            return False
+        if not await self._async_playback_is_owned_now(notify_interruption=False):
+            await self._async_handle_playback_recovery_failure(
+                "speaker takeover before Sonos crossfade setup"
+            )
+            return False
+        if crossfade_state.state == STATE_OFF:
+            self._native_loop_force_restore = True
+            crossfade_enabled = await self._async_call_entity(
+                Platform.SWITCH,
+                SERVICE_TURN_ON,
+                crossfade_entity_id,
+                {},
+            ) and await self._async_refresh_entity(
+                crossfade_entity_id, expected_state=STATE_ON
+            )
+            if not crossfade_enabled:
+                self._last_error = "native_crossfade_not_confirmed"
+                if await self._async_playback_is_owned_now(notify_interruption=False):
+                    await self._async_stop_playback()
+                await self._async_handle_playback_recovery_failure(
+                    "Sonos crossfade could not be confirmed"
+                )
+                return False
+            self._native_loop_force_restore = False
+
+        if not await self._async_playback_is_owned_now(notify_interruption=False):
+            await self._async_handle_playback_recovery_failure(
+                "speaker takeover during Sonos crossfade setup"
+            )
             return False
 
         self._native_loop_force_restore = True

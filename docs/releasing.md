@@ -53,7 +53,8 @@ Every release in this product line retains these safety semantics:
   the queue is not periodically repopulated, while an owned idle state rebuilds
   it with a freshly resolved Local Media URL;
 - Sonos Local Media calls use the `music` media type, refresh cached crossfade
-  state around toggles, and wait for inactive state after stop or pause;
+  state around toggles, wait for inactive state after stop or pause, and start
+  the owned queue before applying crossfade or repeat-all;
 - Sonos loop setup replaces the existing queue; normal stop restores captured
   repeat and crossfade values, while external takeover leaves the replacement
   playback, queue, repeat, and crossfade untouched until a caregiver explicitly
@@ -83,10 +84,11 @@ Every release in this product line retains these safety semantics:
   level while manual mode only suggests it;
 - both modes step down one level after each uninterrupted 120-second quiet
   interval and stop downshifting at Baseline;
-- a 150-second base deadline from the first manual alert or automatic
-  confirmation enters Standby and requests caregiver attention if the episode
-  remains active, including while Level lock is on; one already-pending event
-  gap may receive a bounded, non-renewable grace period;
+- a configurable base deadline, defaulting to 150 seconds, from the first
+  manual alert or automatic confirmation enters Standby and requests caregiver
+  attention if the episode remains active, including while Level lock is on;
+  one already-pending event gap may receive a bounded, non-renewable grace
+  period;
 - unavailable dependencies and playback takeover fail safe;
 - restart discards transient evidence, timers, and notification action IDs;
 - no action can exceed Level 4, Maximum volume, or alter media the integration
@@ -115,7 +117,8 @@ The test suite must cover:
 - complete setup, multiple-entry, reconfigure, options, and development schema
   replacement flows;
 - exact level selection and Standby side effects;
-- all six volume entities and monotonic/Maximum validation;
+- all six volume entities, the minutes-based attention deadline entity, and
+  monotonic/Maximum validation;
 - rising-edge event counting and duplicate-state suppression;
 - rolling 30-second evidence expiry;
 - immediate one-event manual notification plus the two-event and
@@ -131,7 +134,8 @@ The test suite must cover:
 - Level lock persistence, provisional-response handling, blocked increases,
   deferred quiet downshift, manual override, and attention safety override;
 - one-level quiet downshift every 120 seconds in both modes;
-- the 150-second base attention deadline, including cancellation on event gap,
+- the default 150-second base attention deadline, including live configuration,
+  cancellation on event gap,
   one bounded pending-gap grace period, and Standby when still unresolved;
 - exact media-player and notification payloads;
 - distinct and reused per-level media mappings and exact-level resolution;
@@ -170,10 +174,12 @@ against a sleeping child or an unverified speaker.
 4. Select a cry binary sensor, camera, media player, one local sound for each
    active level, and test Companion app notification actions.
 5. Confirm the level select, Automatic operation and Level lock switches, state
-   and recommendation sensors, attention binary sensor, six numbers, and
+   and recommendation sensors, attention binary sensor, seven numbers, and
    Simulate cry event button exist.
-6. Confirm the level is Standby and Automatic operation is off.
-7. Confirm setup did not play media or change volume.
+6. Confirm Attention deadline reads 2.5 minutes, set it to 3 minutes, and
+   confirm the value survives a reload.
+7. Confirm the level is Standby and Automatic operation is off.
+8. Confirm setup did not play media or change volume.
 
 ### Validate the optional dashboard card
 
@@ -242,20 +248,25 @@ against a sleeping child or an unverified speaker.
    track and a deliberately low test volume.
 2. Select an active level. Confirm Nursery Soother replaces the queue with
    exactly one item, enables crossfade, and selects repeat-all.
-3. Listen through a track boundary. Confirm Sonos loops it cleanly without a
+3. Start Spotify Connect playback, return Nursery Soother to Standby, then
+   select an active level while Spotify is playing. Repeat after pausing
+   Spotify so the player still reports Spotify Connect. Confirm both explicit
+   starts stop the prior session, establish the Nursery Soother queue, enable
+   crossfade and repeat-all, and play the configured sound.
+4. Listen through a track boundary. Confirm Sonos loops it cleanly without a
    second queue item or a new Home Assistant play action at the boundary.
-4. Force the still-owned player to idle. Confirm Nursery Soother rebuilds the
+5. Force the still-owned player to idle. Confirm Nursery Soother rebuilds the
    one-item queue and Home Assistant resolves the Local Media source again.
    Record that time-limited Local Media URLs prevent a forever-playback
    guarantee; a stop at URL expiry can introduce a recovery gap.
-5. Select Standby. Confirm the owned queue is cleared and the repeat and
+6. Select Standby. Confirm the owned queue is cleared and the repeat and
    crossfade values from step 1 are restored. If group membership is changed
    during the session, confirm those settings are left untouched instead.
    Confirm the original queue items are not restored.
-6. Select an active level again, then start replacement media from another
+7. Select an active level again, then start replacement media from another
    source. Confirm Nursery Soother enters visible Standby without stopping
    playback or changing the live queue, repeat mode, or crossfade state.
-7. Repeat the active-level and idle-recovery checks with a non-Sonos player, or
+8. Repeat the active-level and idle-recovery checks with a non-Sonos player, or
    a fixture missing one required Sonos feature. Confirm it uses direct media
    playback and never calls queue, repeat, or crossfade actions.
 
@@ -304,8 +315,9 @@ against a sleeping child or an unverified speaker.
 4. Repeat at least one downshift with Automatic operation off to prove quiet
    behavior is mode-independent.
 5. Confirm a cry episode and keep it active. Change levels manually or
-   automatically and confirm the original 150-second attention deadline is not
-   extended.
+   automatically, then change the Attention deadline number. Confirm the
+   original episode deadline is not extended and the new duration applies to
+   the next episode.
 6. Before that deadline in a separate episode, allow the 60-second event gap to
    expire. Confirm the attention timer is canceled.
 7. Stop events shortly before the base deadline so the 60-second event gap
@@ -379,8 +391,8 @@ Before tagging, compare the implementation with:
 - `docs/architecture.md` evidence generations, timers, side-effect guards,
   ownership, Sonos native-loop ownership, attention invariants, and frontend
   registration boundary;
-- `examples/dashboard.yaml` optional custom card, all seven entity references,
-  camera mode, rename guidance, native-card fallback, six numbers, and
+- `examples/dashboard.yaml` optional custom card, all eight entity references,
+  camera mode, rename guidance, native-card fallback, seven numbers, and
   confirmed artificial-event action;
 - `product_pitch.md` so implemented per-level sounds and remaining deferred
   features are described accurately.
@@ -399,7 +411,8 @@ Release notes must highlight:
 - five level volumes plus Maximum;
 - the immediate first-event manual alert and automatic pulse-confirmation
   timing defaults;
-- gradual quiet downshift and the bounded 150-second-base attention cutoff;
+- gradual quiet downshift and the configurable bounded attention cutoff,
+  defaulting to 2.5 minutes;
 - the independent Local Media selection for every active level;
 - the Sonos one-item crossfade/repeat-all optimization, queue replacement, and
   generic-player fallback;

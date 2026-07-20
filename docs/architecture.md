@@ -127,7 +127,7 @@ custom_components/nursery_soother/
 ├── switch.py            # Automatic, Level lock, and Baseline preview controls
 ├── sensor.py            # policy-state and recommendation sensors
 ├── binary_sensor.py     # attention-required indicator
-├── number.py            # five level volumes and Maximum
+├── number.py            # six volume controls and attention deadline
 ├── button.py            # artificial cry-event command
 ├── diagnostics.py       # redacted support data
 ├── manifest.json        # Home Assistant and HACS metadata
@@ -185,9 +185,9 @@ that snapshot directly and refreshes it every 10 seconds. Camera taps open Home
 Assistant's normal camera more-info dialog. The attention banner's Attend
 action opens the same dialog and deliberately does not acknowledge or clear
 attention or change the level.
-Configuration-only volume numbers and the artificial-event button stay on
-native entity surfaces. Native cards remain a complete fallback if the
-optional module cannot render.
+Configuration-only volume and attention-deadline numbers and the
+artificial-event button stay on native entity surfaces. Native cards remain a
+complete fallback if the optional module cannot render.
 
 ## Config-entry lifecycle
 
@@ -481,10 +481,13 @@ attention safety deadline turns playback off.
 
 ### Bounded attention deadline
 
-The first manual alert or automatic confirmation starts one 150-second base
-attention timer for the episode. It is not restarted by a suggestion, manual
-selection, automatic increase, dwell, or quiet downshift. If the event-gap
-timer closes the episode first, the attention timer is canceled.
+The first manual alert or automatic confirmation starts one configurable base
+attention timer for the episode, defaulting to 150 seconds (2.5 minutes). It is
+not restarted by a suggestion, manual selection, automatic increase, dwell, or
+quiet downshift. If the event-gap timer closes the episode first, the attention
+timer is canceled. The native minutes-based number updates the stored duration
+for future episodes without moving a deadline already owned by an active
+episode.
 
 If the base deadline arrives while the physical sensor is off and an event-gap
 timer is already pending, that existing gap receives one bounded grace period
@@ -572,11 +575,14 @@ The optimized path is selected only when the configured entity is registered
 by the Sonos integration, its paired crossfade switch can be identified, and
 the player exposes clear-playlist, enqueue, and repeat controls. The controller
 captures the initial repeat mode, crossfade state, and Sonos group membership;
-enables crossfade when needed; clears the queue; enqueues the selected Local
-Media track once with playback; and selects repeat-all. Sonos owns every loop
-boundary after that setup. There is no timer or periodic queue repopulation.
-Because Sonos crossfade state is subscription-backed and can lag the device,
-the controller explicitly refreshes that entity before capture and after each
+clears the queue; enqueues and starts the selected Local Media track; enables
+crossfade when needed; and selects repeat-all. Starting the queue before either
+play-mode change is required for takeover from inactive external transports
+such as Spotify Connect, which can keep owning Sonos's transport after stop or
+pause and reject crossfade with UPnP error 712. Sonos owns every loop boundary
+after that setup. There is no timer or periodic queue repopulation. Because
+Sonos crossfade state is subscription-backed and can lag the device, the
+controller explicitly refreshes that entity before capture and after each
 toggle. Local Media MIME types are normalized to Sonos's `music` media type at
 the service boundary. A stop or pause must publish an inactive state before a
 track replacement clears ownership and begins new queue setup.
@@ -675,10 +681,10 @@ of polling.
 | Platform | Entities | Behavior |
 | --- | --- | --- |
 | `select` | Level | Exact Standby, Baseline, or Level 1–4 command |
-| `switch` | Automatic operation, Level lock | Choose automatic response and freeze policy-driven level changes |
+| `switch` | Automatic operation, Level lock, Baseline sound preview | Choose automatic response, freeze policy-driven level changes, or preview the Baseline sound in Standby |
 | `sensor` | State, Recommendation | Read-only policy values and safe explanatory attributes |
 | `binary_sensor` | Attention required | True only when direct caregiver attention is requested |
-| `number` | Baseline, Level 1, Level 2, Level 3, Level 4, Maximum volume | Persist validated percentages and apply safe live updates |
+| `number` | Baseline, Level 1, Level 2, Level 3, Level 4, Maximum volume; Attention deadline | Persist validated percentages and apply safe live updates; configure future attention deadlines in minutes |
 | `button` | Simulate cry event | Append one artificial event through the real policy |
 
 Expected default entity IDs are samples, not internal identity:
@@ -687,6 +693,7 @@ Expected default entity IDs are samples, not internal identity:
 select.nursery_soother_level
 switch.nursery_soother_automatic_operation
 switch.nursery_soother_level_lock
+switch.nursery_soother_baseline_sound_preview
 sensor.nursery_soother_state
 sensor.nursery_soother_recommendation
 binary_sensor.nursery_soother_attention_required
@@ -696,6 +703,7 @@ number.nursery_soother_level_2_volume
 number.nursery_soother_level_3_volume
 number.nursery_soother_level_4_volume
 number.nursery_soother_maximum_volume
+number.nursery_soother_attention_deadline
 button.nursery_soother_simulate_cry_event
 ```
 
@@ -765,10 +773,11 @@ without raw camera payloads or notification bodies.
   implicit response.
 - Quiet tests prove one downshift per 120-second uninterrupted interval in both
   modes, interruption by a new event, and a floor at Baseline.
-- Attention tests prove the 150-second base timer begins at the first manual
-  alert or automatic confirmation, is not extended by level changes, lets one
-  already-pending event gap resolve first, cannot be extended repeatedly by
-  fresh events, and otherwise enters Standby with caregiver attention.
+- Attention tests prove the default 150-second base timer begins at the first
+  manual alert or automatic confirmation, is not extended by level or runtime
+  configuration changes, lets one already-pending event gap resolve first,
+  cannot be extended repeatedly by fresh events, and otherwise enters Standby
+  with caregiver attention.
 - Safety tests cover monotonic configuration, the runtime Maximum cap,
   Standby, dependency loss, playback takeover, failed media actions, Sonos
   one-item repeat-all setup, idle rebuilding, and conservative setting cleanup.
@@ -784,7 +793,7 @@ without raw camera payloads or notification bodies.
   ownership, timing bounds, volume relationships, independently optional action
   triggers, and deliberate v7 remove-and-re-add schema replacement.
 - Entity tests cover stable unique IDs, device linkage, level select options,
-  Automatic operation, six numbers, state propagation, and standard actions.
+  Automatic operation, seven numbers, state propagation, and standard actions.
 - Lifecycle tests cover Standby startup, exact-level recovery, unload cleanup,
   restart evidence reset, and removal without orphan callbacks.
 - Diagnostics tests prove every sensitive field is redacted.

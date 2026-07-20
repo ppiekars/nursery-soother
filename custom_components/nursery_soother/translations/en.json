@@ -201,6 +201,9 @@
       },
       "max_volume": {
         "name": "Maximum volume"
+      },
+      "attention_minutes": {
+        "name": "Attention deadline"
       }
     },
     "button": {
@@ -239,6 +242,9 @@
     },
     "invalid_volume": {
       "message": "Volumes must increase monotonically from Baseline through Level 4 and remain at or below Maximum."
+    },
+    "invalid_attention_minutes": {
+      "message": "The attention deadline must be between 0.5 and 60 minutes in 0.5-minute steps."
     },
     "standby": {
       "message": "Nursery Soother is in Standby. Select an active level first."

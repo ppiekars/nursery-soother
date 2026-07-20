@@ -9,9 +9,9 @@ from unittest.mock import Mock
 
 import pytest
 from homeassistant.components.binary_sensor import BinarySensorDeviceClass
-from homeassistant.components.number import NumberMode
+from homeassistant.components.number import NumberDeviceClass, NumberEntity, NumberMode
 from homeassistant.components.sensor import SensorDeviceClass
-from homeassistant.const import PERCENTAGE, EntityCategory
+from homeassistant.const import PERCENTAGE, EntityCategory, UnitOfTime
 from homeassistant.helpers.device_registry import DeviceEntryType
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
@@ -24,6 +24,7 @@ from custom_components.nursery_soother import select as select_platform
 from custom_components.nursery_soother import sensor as sensor_platform
 from custom_components.nursery_soother import switch as switch_platform
 from custom_components.nursery_soother.const import (
+    CONF_ATTENTION_MINUTES,
     CONF_AUTOMATIC_OPERATION,
     CONF_BASELINE_PREVIEW,
     CONF_BASELINE_VOLUME,
@@ -52,11 +53,18 @@ if TYPE_CHECKING:
     from homeassistant.helpers.entity import Entity
 
 PERCENTAGE_MAX = 100
-ENTITY_COUNT = 14
+ENTITY_COUNT = 15
+DEFAULT_ATTENTION_MINUTES = 2.5
+MIN_ATTENTION_MINUTES = 0.5
+MAX_ATTENTION_MINUTES = 60
+ATTENTION_MINUTES_STEP = 0.5
+UPDATED_ATTENTION_MINUTES = 3.5
+UPDATED_ATTENTION_SECONDS = 210
 
 
 @dataclass
 class _FakeSettings:
+    attention_seconds: int = 150
     baseline_volume: float = 10.0
     level_1_volume: float = 15.0
     level_2_volume: float = 20.0
@@ -145,6 +153,12 @@ class _FakeController:
         setattr(self.settings, key, value)
         self.emit()
 
+    async def async_set_attention_minutes(self, value: float) -> None:
+        """Record and apply the caregiver-facing attention duration."""
+        self.calls.append((CONF_ATTENTION_MINUTES, value))
+        self.settings.attention_seconds = round(value * 60)
+        self.emit()
+
 
 @pytest.fixture
 def controller() -> _FakeController:
@@ -188,7 +202,7 @@ async def test_shared_metadata_availability_and_listener_lifecycle(
     entry: MockConfigEntry,
     controller: _FakeController,
 ) -> None:
-    """The fourteen entities share stable metadata and observable updates."""
+    """The fifteen entities share stable metadata and observable updates."""
     entities = await _all_entities(hass, entry)
 
     expected_keys = {
@@ -206,6 +220,7 @@ async def test_shared_metadata_availability_and_listener_lifecycle(
         CONF_LEVEL_3_VOLUME,
         CONF_LEVEL_4_VOLUME,
         CONF_MAX_VOLUME,
+        CONF_ATTENTION_MINUTES,
     }
     assert len(entities) == ENTITY_COUNT
     assert {entity.unique_id for entity in entities} == {
@@ -381,7 +396,7 @@ async def test_six_volume_numbers_delegate_safe_settings(
     controller: _FakeController,
 ) -> None:
     """Every active level and the hard cap has one configuration number."""
-    entities: list[number_platform.NurserySootherVolumeNumber] = []
+    entities: list[NumberEntity] = []
     await number_platform.async_setup_entry(hass, entry, entities.extend)
     by_key = {entity.entity_description.key: entity for entity in entities}
 
@@ -393,7 +408,7 @@ async def test_six_volume_numbers_delegate_safe_settings(
         CONF_LEVEL_4_VOLUME: 30.0,
         CONF_MAX_VOLUME: 40.0,
     }
-    assert set(by_key) == set(expected)
+    assert set(by_key) == {*expected, CONF_ATTENTION_MINUTES}
     for key, initial in expected.items():
         entity = by_key[key]
         assert entity.native_value == initial
@@ -409,6 +424,36 @@ async def test_six_volume_numbers_delegate_safe_settings(
         assert entity.native_value == initial + 1
 
     assert controller.calls == [(key, value + 1) for key, value in expected.items()]
+
+
+async def test_attention_number_exposes_minutes_and_persists_seconds(
+    hass: HomeAssistant,
+    entry: MockConfigEntry,
+    controller: _FakeController,
+) -> None:
+    """The attention configuration is readable and writable in minutes."""
+    entities: list[NumberEntity] = []
+    await number_platform.async_setup_entry(hass, entry, entities.extend)
+    attention = next(
+        entity
+        for entity in entities
+        if entity.entity_description.key == CONF_ATTENTION_MINUTES
+    )
+
+    assert attention.native_value == DEFAULT_ATTENTION_MINUTES
+    assert attention.native_min_value == MIN_ATTENTION_MINUTES
+    assert attention.native_max_value == MAX_ATTENTION_MINUTES
+    assert attention.native_step == ATTENTION_MINUTES_STEP
+    assert attention.native_unit_of_measurement == UnitOfTime.MINUTES
+    assert attention.device_class is NumberDeviceClass.DURATION
+    assert attention.mode is NumberMode.BOX
+    assert attention.entity_category is EntityCategory.CONFIG
+
+    await attention.async_set_native_value(UPDATED_ATTENTION_MINUTES)
+
+    assert attention.native_value == UPDATED_ATTENTION_MINUTES
+    assert controller.settings.attention_seconds == UPDATED_ATTENTION_SECONDS
+    assert controller.calls == [(CONF_ATTENTION_MINUTES, UPDATED_ATTENTION_MINUTES)]
 
 
 async def test_simulator_is_the_only_button(

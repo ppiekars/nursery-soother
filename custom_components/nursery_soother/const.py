@@ -5,6 +5,7 @@ from typing import Final
 from homeassistant.const import Platform
 
 CONF_ATTENTION_SECONDS = "attention_seconds"
+CONF_ATTENTION_MINUTES = "attention_minutes"
 CONF_AUTOMATIC_OPERATION = "automatic_operation"
 CONF_BASELINE_PREVIEW = "baseline_preview"
 CONF_BASELINE_SOUND = "baseline_sound"
@@ -78,6 +79,9 @@ NAME = "Nursery Soother"
 NOTIFICATION_ACTION_PREFIX = "NURSERY_SOOTHER"
 NOTIFICATION_TAG_PREFIX = "nursery-soother"
 MAX_VOLUME_PERCENT = 100.0
+MIN_ATTENTION_MINUTES = 0.5
+MAX_ATTENTION_MINUTES = 60.0
+ATTENTION_MINUTES_STEP = 0.5
 
 ENTITY_DOMAINS: Final = {
     CONF_CRY_SENSOR: Platform.BINARY_SENSOR,

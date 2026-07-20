@@ -215,7 +215,7 @@ The initial defaults are intentionally low and conservative:
 | Provisional Level 1 timeout | 25 seconds | Grace for confirming the immediate first-event response |
 | Level dwell | 20 seconds | Minimum time before another response decision |
 | Quiet step-down | 120 seconds | Uninterrupted quiet required for each one-level decrease |
-| Attention timeout | 150 seconds | Base deadline from the first manual alert or automatic confirmation; one pending no-event gap may finish first |
+| Attention timeout | 2.5 minutes | Configurable base deadline from the first manual alert or automatic confirmation; one pending no-event gap may finish first |
 
 Volume settings must satisfy:
 
@@ -256,6 +256,7 @@ than depend on a copied sample ID.
 | `number` | Level 3 volume percentage | `number.set_value` |
 | `number` | Level 4 volume percentage | `number.set_value` |
 | `number` | Maximum volume percentage | `number.set_value` |
+| `number` | Attention deadline in minutes | `number.set_value` |
 | `button` | Inject one finite cry event for testing | `button.press` |
 
 The state sensor reports `standby`, `soothing`, `cry_pending`, `responding`,
@@ -329,11 +330,13 @@ can still enter Standby or lower output as required.
 
 In both modes, each 120-second uninterrupted quiet interval moves down one
 level until Baseline. The first manual alert or automatic confirmation starts
-a 150-second attention deadline. If a 60-second no-event gap is already
-pending when that deadline arrives, it gets one bounded chance to finish; new
-events cannot extend that grace. A completed gap closes the episode and
-cancels attention. Otherwise the controller enters Standby and requests direct
-caregiver attention.
+the configured attention deadline, which defaults to 2.5 minutes. If a
+60-second no-event gap is already pending when that deadline arrives, it gets
+one bounded chance to finish; new events cannot extend that grace. A completed
+gap closes the episode and cancels attention. Otherwise the controller enters
+Standby and requests direct caregiver attention. The native **Attention
+deadline** number changes the duration for future episodes without moving a
+deadline already in progress.
 
 ## Parent notifications
 
@@ -404,8 +407,9 @@ selected, so it does not start a session, the response policy, or the timer.
 any camera view opens the standard camera more-info dialog. When attention is
 required, **Attend** opens that same camera dialog; it does not acknowledge or clear attention,
 change the level, or call a separate Acknowledge action.
-Volume numbers and **Simulate cry event** remain available through native
-entity cards and the device page rather than this compact card.
+Volume and attention-deadline numbers and **Simulate cry event** remain
+available through native entity cards and the device page rather than this
+compact card.
 
 Entity IDs are registry data and can be renamed. Select the configured camera
 and the seven entities shown on the Nursery Soother device page instead of
@@ -430,13 +434,16 @@ guide](https://companion.home-assistant.io/docs/integrations/siri-shortcuts/).
 ## Playback continuity
 
 For a compatible Sonos player, Nursery Soother replaces the current Sonos
-queue with one copy of the selected track, enables the player's crossfade, and
-sets repeat to **All**. Sonos then loops that single queue item itself. Home
-Assistant does not repopulate the queue at every track boundary, so the loop
-does not depend on a periodic timer or a new play command when the track ends.
-Nursery Soother refreshes Sonos's subscription-backed crossfade entity before
-capturing or confirming it, normalizes Local Media's MIME type to Sonos's
-`music` media type, and waits for stop state before replacing a track.
+queue with one copy of the selected track, starts that queue transport, enables
+the player's crossfade, and sets repeat to **All**. Establishing the queue
+transport first lets an explicit start take over an inactive Spotify Connect or
+other external transport that rejects Sonos play-mode changes even after it has
+stopped. Sonos then loops that single queue item itself. Home Assistant does not
+repopulate the queue at every track boundary, so the loop does not depend on a
+periodic timer or a new play command when the track ends. Nursery Soother
+refreshes Sonos's subscription-backed crossfade entity before capturing or
+confirming it, normalizes Local Media's MIME type to Sonos's `music` media type,
+and waits for stop state before replacing a track.
 
 The Sonos optimization deliberately replaces any queue that existed before the
 soothing session and cannot restore those prior queue items. On a normal
