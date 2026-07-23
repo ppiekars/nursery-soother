@@ -178,8 +178,8 @@ rename therefore requires updating the Lovelace config.
 The card reads state from those entities and invokes only standard Home
 Assistant select and switch actions. Its six level controls select exact
 options with `select.select_option`; Baseline preview, Auto, and Lock call
-`switch.turn_on` or `switch.turn_off`; and a valid recommendation can select its exact
-`suggested_level`. `live` and `auto` delegate rendering to a native
+`switch.turn_on` or `switch.turn_off`; and a valid recommendation can select
+its exact `suggested_level`. `live` and `auto` delegate rendering to a native
 picture-entity card and fall back to an authenticated snapshot; `image` uses
 that snapshot directly and refreshes it every 10 seconds. Camera taps open Home
 Assistant's normal camera more-info dialog. The attention banner's Attend
@@ -461,14 +461,15 @@ level media resolution, and the Maximum-volume ceiling still apply.
 
 Level lock freezes policy-driven output changes at the current exact level.
 While locked, cry evidence can still confirm, reset stages, start the attention
-deadline, and notify caregivers, but it cannot provisionally or automatically
-increase the level. Quiet expiry is remembered without applying a downshift;
-unlocking starts a fresh quiet interval before that deferred decrease.
+deadline, notify caregivers, and produce an exact higher-level suggestion, but
+it cannot provisionally or automatically increase the level. Quiet expiry is
+remembered without applying a downshift; unlocking starts a fresh quiet
+interval before that deferred decrease.
 
 Exact parent selections and configured physical-button commands remain
 available while locked and become the new held level. The lock does not
-override dependency fail-safe, playback takeover handling, Maximum volume, or
-the bounded attention deadline.
+override dependency fail-safe, playback takeover handling, Maximum volume,
+notification-delivery fail-safe, or the bounded attention deadline.
 
 ### Quiet downshift
 

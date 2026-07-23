@@ -78,7 +78,8 @@ Every release in this product line retains these safety semantics:
   and never changes it;
 - Automatic operation changes upward only, exactly one level per decision;
 - Level lock prevents provisional increases, automatic increases, and quiet
-  downshifts while leaving exact parent selections and Standby available;
+  downshifts while leaving notifications, suggestions, exact parent
+  selections, and Standby available;
 - each subsequent response decision waits at least 20 seconds and requires one
   fresh event or six fresh active seconds; automatic mode applies the next
   level while manual mode only suggests it;
@@ -131,8 +132,9 @@ The test suite must cover:
 - immediate manual exact-level suggestion without any volume action;
 - automatic one-level increase, 20-second dwell, fresh-evidence boundary, and
   Level 4 ceiling;
-- Level lock persistence, provisional-response handling, blocked increases,
-  deferred quiet downshift, manual override, and attention safety override;
+- Level lock persistence, provisional-response handling, blocked policy
+  increases, deferred quiet downshift, preserved notifications and suggestions,
+  manual override, and attention safety override;
 - one-level quiet downshift every 120 seconds in both modes;
 - the default 150-second base attention deadline, including live configuration,
   cancellation on event gap,
@@ -407,7 +409,8 @@ Release notes must highlight:
 - removal of the old development-only controls;
 - any required remove-and-reintegrate step;
 - the six exact levels and Automatic operation default off;
-- Level lock default off and its parent-control and safety overrides;
+- Level lock default off and its notification, suggestion, parent-control, and
+  safety overrides;
 - five level volumes plus Maximum;
 - the immediate first-event manual alert and automatic pulse-confirmation
   timing defaults;

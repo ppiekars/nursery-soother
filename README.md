@@ -5,13 +5,14 @@ existing cry-detection sensor, camera, and media player into a conservative,
 SNOO-inspired soothing workflow.
 
 It provides one exact level control: **Standby**, **Baseline**, and **Level 1**
-through **Level 4**. A parent can always select a level directly. An optional
+through **Level 4**. A parent can select a level directly. An optional
 **Automatic operation** switch gives the first cry event an immediate,
 reversible Baseline-to-Level-1 response, then allows confirmed, continuing cry
 events to move up one level at a time. With automatic operation off, the
 integration immediately reports the first cry event and suggests the exact
-next level instead. A separate **Level lock** switch freezes policy-driven increases and
-quiet downshifts at the selected level while preserving direct parent control.
+next level instead. A separate **Level lock** switch makes the current active
+level a policy hold: automatic increases and quiet downshifts stop, while
+evidence, notifications, suggestions, and direct parent control continue.
 
 > [!IMPORTANT]
 > Nursery Soother is not a medical device, baby monitor, or substitute for
@@ -70,9 +71,10 @@ The following rules are deliberate:
   exact next-level suggestion. It never changes the level by itself.
 - Quiet downshifts are conservative in both modes: each uninterrupted quiet
   interval moves down one level, stopping at Baseline rather than Standby.
-- Level lock freezes automatic increases and quiet downshifts. Parents can
-  still select any exact level or Standby while it is on. Dependency failures,
-  playback takeover, and the bounded attention cutoff remain safety overrides.
+- Level lock freezes automatic increases and quiet downshifts in either
+  operating mode. Evidence, notifications, and exact higher-level suggestions
+  continue. Direct parent controls can still select any exact level or Standby.
+  Protective fail-safes may also lower output or stop playback.
 - An unresolved confirmed episode has one base attention deadline. If a
   no-event gap is already pending when it expires, that gap gets one bounded
   grace period to resolve first. Fresh events cannot extend the grace. An
@@ -321,9 +323,10 @@ level, exceed Level 4, bypass Maximum, leave Standby, or override a dependency
 or playback-ownership fault. A parent must select an active level before cry
 response monitoring begins.
 
-With **Level lock on**, evidence and caregiver notifications continue, but the
-policy cannot increase or quietly decrease the level. A parent may still select
-another exact level or Standby. Unlocking resumes normal policy timing; a quiet
+With **Level lock on**, evidence, caregiver notifications, and exact
+higher-level suggestions continue, but the policy cannot increase or quietly
+decrease the level. A parent may still select any exact level, accept a
+suggestion, or select Standby. Unlocking resumes normal policy timing; a quiet
 downshift deferred by the lock receives a fresh quiet interval. The base
 attention deadline, dependency fail-safe, and playback-ownership protections
 can still enter Standby or lower output as required.

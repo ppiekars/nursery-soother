@@ -164,7 +164,8 @@ It provides:
 
 - one exact level select containing Standby, Baseline, and Levels 1–4;
 - an Automatic operation switch;
-- a Level lock switch that freezes policy changes without blocking parents;
+- a Level lock switch that freezes policy changes without blocking parents,
+  notifications, or suggestions;
 - six safe volume controls: five levels plus Maximum;
 - a policy-state sensor and recommendation sensor;
 - a caregiver-attention binary sensor;
@@ -197,7 +198,8 @@ After installation, a user adds **Nursery Soother** from the Integrations page:
 7. review evidence, dwell, quiet, and attention timings;
 8. leave Standby only after testing the actual speaker;
 9. enable Automatic operation only after validating manual suggestions.
-10. use Level lock when a parent wants policy output held at an exact level.
+10. use Level lock when a parent wants policy output held at an exact level
+    while notifications and manual suggestions continue.
 
 The integration creates standard entities similar to:
 

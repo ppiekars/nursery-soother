@@ -1219,13 +1219,17 @@ async def test_starting_session_adopts_running_baseline_preview(
 
 
 @pytest.mark.parametrize("initial_level", ACTIVE_LEVELS, ids=lambda level: level.value)
+@pytest.mark.parametrize("locked", [False, True], ids=("unlocked", "locked"))
 async def test_trigger_toggle_sends_every_active_level_to_standby(
     started_controller: tuple[NurserySootherController, RecordedCalls],
     initial_level: SoothingLevel,
+    *,
+    locked: bool,
 ) -> None:
-    """A configured toggle turns off every active soothing level."""
+    """The explicit off toggle remains available at every active level."""
     controller, calls = started_controller
     await controller.async_set_level(initial_level)
+    await controller.async_set_locked(locked=locked)
     stop_count = len(_media_calls(calls, SERVICE_MEDIA_STOP))
 
     await controller.async_toggle_from_trigger()
@@ -1233,15 +1237,20 @@ async def test_trigger_toggle_sends_every_active_level_to_standby(
     assert controller.level is SoothingLevel.STANDBY
     assert controller.state is SootherState.STANDBY
     assert controller.entry.options[CONF_LEVEL] == SoothingLevel.STANDBY.value
+    assert controller.locked is locked
     assert len(_media_calls(calls, SERVICE_MEDIA_STOP)) == stop_count + 1
 
 
+@pytest.mark.parametrize("locked", [False, True], ids=("unlocked", "locked"))
 async def test_trigger_toggle_starts_baseline_from_standby(
     started_controller: tuple[NurserySootherController, RecordedCalls],
+    *,
+    locked: bool,
 ) -> None:
     """A configured toggle starts the conservative Baseline output when off."""
     controller, calls = started_controller
     await controller.async_set_level(SoothingLevel.STANDBY)
+    await controller.async_set_locked(locked=locked)
     play_count = len(_media_calls(calls, SERVICE_PLAY_MEDIA))
     volume_count = len(_media_calls(calls, SERVICE_VOLUME_SET))
 
@@ -1250,6 +1259,7 @@ async def test_trigger_toggle_starts_baseline_from_standby(
     assert controller.level is SoothingLevel.BASELINE
     assert controller.state is SootherState.SOOTHING
     assert controller.entry.options[CONF_LEVEL] == SoothingLevel.BASELINE.value
+    assert controller.locked is locked
     assert len(_media_calls(calls, SERVICE_PLAY_MEDIA)) == play_count + 1
     assert len(_media_calls(calls, SERVICE_VOLUME_SET)) == volume_count + 1
     assert _media_calls(calls, SERVICE_VOLUME_SET)[-1].data[
@@ -1379,27 +1389,74 @@ async def test_concurrent_trigger_increases_serialize_level_selection(
         ),
     ],
 )
-async def test_trigger_decrease_moves_one_level_while_locked(
+@pytest.mark.parametrize("locked", [False, True], ids=("unlocked", "locked"))
+async def test_trigger_decrease_moves_one_level_regardless_of_lock(
     started_controller: tuple[NurserySootherController, RecordedCalls],
     initial_level: SoothingLevel,
     expected_level: SoothingLevel,
     expected_volume: float,
+    *,
+    locked: bool,
 ) -> None:
-    """A decrease gesture is direct parent control and moves one level."""
+    """A direct decrease gesture remains available while policy is locked."""
     controller, calls = started_controller
     await controller.async_set_level(initial_level)
-    await controller.async_set_locked(locked=True)
+    await controller.async_set_locked(locked=locked)
     volume_count = len(_media_calls(calls, SERVICE_VOLUME_SET))
 
     await controller.async_decrease_from_trigger()
 
-    assert controller.locked is True
+    assert controller.locked is locked
     assert controller.level is expected_level
     assert controller.entry.options[CONF_LEVEL] == expected_level.value
     assert len(_media_calls(calls, SERVICE_VOLUME_SET)) == volume_count + 1
     assert _media_calls(calls, SERVICE_VOLUME_SET)[-1].data[
         ATTR_MEDIA_VOLUME_LEVEL
     ] == pytest.approx(expected_volume / 100)
+
+
+@pytest.mark.parametrize(
+    "automatic",
+    [False, True],
+    ids=("manual-mode", "automatic-mode"),
+)
+async def test_parent_exact_levels_remain_available_while_locked(
+    started_controller: tuple[NurserySootherController, RecordedCalls],
+    *,
+    automatic: bool,
+) -> None:
+    """The lock never blocks exact caregiver selections in either mode."""
+    controller, calls = started_controller
+    await controller.async_set_level(SoothingLevel.LEVEL_3)
+    await controller.async_set_automatic(enabled=automatic)
+    await controller.async_set_locked(locked=True)
+    volume_count = len(_media_calls(calls, SERVICE_VOLUME_SET))
+
+    await controller.async_set_level(SoothingLevel.LEVEL_1)
+
+    assert controller.level is SoothingLevel.LEVEL_1
+    assert controller.entry.options[CONF_LEVEL] == SoothingLevel.LEVEL_1.value
+    assert len(_media_calls(calls, SERVICE_VOLUME_SET)) == volume_count + 1
+    assert _media_calls(calls, SERVICE_VOLUME_SET)[-1].data[
+        ATTR_MEDIA_VOLUME_LEVEL
+    ] == pytest.approx(LEVEL_1_PERCENT / 100)
+
+    await controller.async_set_level(SoothingLevel.LEVEL_4)
+
+    assert controller.level is SoothingLevel.LEVEL_4
+    assert controller.entry.options[CONF_LEVEL] == SoothingLevel.LEVEL_4.value
+    assert len(_media_calls(calls, SERVICE_VOLUME_SET)) == volume_count + 2
+    assert _media_calls(calls, SERVICE_VOLUME_SET)[-1].data[
+        ATTR_MEDIA_VOLUME_LEVEL
+    ] == pytest.approx(LEVEL_4_PERCENT / 100)
+
+    stop_count = len(_media_calls(calls, SERVICE_MEDIA_STOP))
+    await controller.async_set_level(SoothingLevel.STANDBY)
+
+    assert controller.level is SoothingLevel.STANDBY
+    assert controller.entry.options[CONF_LEVEL] == SoothingLevel.STANDBY.value
+    assert controller.locked is True
+    assert len(_media_calls(calls, SERVICE_MEDIA_STOP)) == stop_count + 1
 
 
 @pytest.mark.parametrize(
@@ -1644,19 +1701,25 @@ async def test_failed_parent_level_change_reports_noncritical_stop_failure(
     hass.services.async_register("media_player", SERVICE_MEDIA_STOP, calls.media.append)
 
 
+@pytest.mark.parametrize("locked", [False, True], ids=("unlocked", "locked"))
 async def test_manual_first_pulse_immediately_suggests_exact_next_level(
     hass: HomeAssistant,
     started_controller: tuple[NurserySootherController, RecordedCalls],
+    *,
+    locked: bool,
 ) -> None:
-    """Manual mode immediately explains one event without changing the level."""
+    """Manual mode suggests and notifies on one event even while locked."""
     controller, calls = started_controller
+    await controller.async_set_locked(locked=locked)
     volume_count = len(_media_calls(calls, SERVICE_VOLUME_SET))
 
     await _cry_pulse(hass)
 
     assert controller.level is SoothingLevel.BASELINE
+    assert controller.locked is locked
     assert controller.state is SootherState.RESPONDING
     assert controller.recommendation is Recommendation.INCREASE_LEVEL
+    assert controller.suggested_level is SoothingLevel.LEVEL_1
     assert len(_media_calls(calls, SERVICE_VOLUME_SET)) == volume_count
     notifications = _incident_notifications(calls)
     assert len(notifications) == PARENT_COUNT
@@ -2362,11 +2425,11 @@ async def test_automatic_toggle_persists_without_changing_output(
     assert len(calls.media) == media_count
 
 
-async def test_level_lock_blocks_automatic_response_but_allows_parent_level(
+async def test_level_lock_replaces_automatic_response_with_parent_suggestion(
     hass: HomeAssistant,
     started_controller: tuple[NurserySootherController, RecordedCalls],
 ) -> None:
-    """Lock freezes policy output while an exact parent selection still works."""
+    """Locked automatic mode still notifies and permits manual increases."""
     controller, calls = started_controller
     await controller.async_set_automatic(enabled=True)
     await controller.async_set_locked(locked=True)
@@ -2379,7 +2442,18 @@ async def test_level_lock_blocks_automatic_response_but_allows_parent_level(
     assert controller.entry.options[CONF_LEVEL_LOCK] is True
     assert controller.level is SoothingLevel.BASELINE
     assert controller.recommendation is Recommendation.INCREASE_LEVEL
+    assert controller.suggested_level is SoothingLevel.LEVEL_1
     assert len(_media_calls(calls, SERVICE_VOLUME_SET)) == volume_count
+    notifications = _incident_notifications(calls)
+    assert len(notifications) == PARENT_COUNT
+    assert all("Level 1" in call.data["message"] for call in notifications)
+
+    action = _action_containing(notifications[0], "Level 1")
+    hass.bus.async_fire(EVENT_NOTIFICATION_ACTION, {"action": action})
+    await hass.async_block_till_done()
+
+    assert controller.locked is True
+    assert controller.level is SoothingLevel.LEVEL_1
 
     await controller.async_set_level(SoothingLevel.LEVEL_2)
 
@@ -2414,13 +2488,21 @@ async def test_unlock_releases_unconfirmed_provisional_without_double_increase(
     assert controller.diagnostics["initial_level_1_applied"] is False
 
 
+@pytest.mark.parametrize(
+    "automatic",
+    [False, True],
+    ids=("manual-mode", "automatic-mode"),
+)
 async def test_level_lock_defers_quiet_downshift_until_unlocked(
     hass: HomeAssistant,
     started_controller: tuple[NurserySootherController, RecordedCalls],
+    *,
+    automatic: bool,
 ) -> None:
-    """Quiet cannot lower a locked level and gets a fresh interval on unlock."""
+    """Quiet in either mode cannot lower a locked active level."""
     controller, _ = started_controller
     await controller.async_set_level(SoothingLevel.LEVEL_3)
+    await controller.async_set_automatic(enabled=automatic)
     await controller.async_set_locked(locked=True)
     await _initial_cry_pulses(hass)
     await _advance(hass, 190)
