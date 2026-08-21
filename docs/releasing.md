@@ -83,11 +83,16 @@ Every release in this product line retains these safety semantics:
 - each subsequent response decision waits at least 20 seconds and requires one
   fresh event or six fresh active seconds; automatic mode applies the next
   level while manual mode only suggests it;
+- consecutive unchanged manual or Level-lock suggestions are deduplicated for
+  each caregiver target already reached; a missed target is retried without
+  re-alerting another, while a changed level, new episode, or final attention
+  request can notify again;
 - both modes step down one level after each uninterrupted 120-second quiet
   interval and stop downshifting at Baseline;
 - a configurable base deadline, defaulting to 150 seconds, from the first
-  manual alert or automatic confirmation enters Standby and requests caregiver
-  attention if the episode remains active, including while Level lock is on;
+  manual alert or automatic confirmation preserves current playback and
+  requests caregiver attention if the episode remains active, including while
+  Level lock is on;
   one already-pending event gap may receive a bounded, non-renewable grace
   period;
 - unavailable dependencies and playback takeover fail safe;
@@ -134,11 +139,12 @@ The test suite must cover:
   Level 4 ceiling;
 - Level lock persistence, provisional-response handling, blocked policy
   increases, deferred quiet downshift, preserved notifications and suggestions,
-  manual override, and attention safety override;
+  manual override, and caregiver-attention escalation;
 - one-level quiet downshift every 120 seconds in both modes;
 - the default 150-second base attention deadline, including live configuration,
   cancellation on event gap,
-  one bounded pending-gap grace period, and Standby when still unresolved;
+  one bounded pending-gap grace period, and preserved playback when still
+  unresolved;
 - exact media-player and notification payloads;
 - distinct and reused per-level media mappings and exact-level resolution;
 - compatible Sonos one-item queue, repeat-all and crossfade setup, no periodic
@@ -283,11 +289,12 @@ against a sleeping child or an unverified speaker.
 4. Before the 20-second dwell expires, produce another pulse and confirm it
    does not create another response decision.
 5. After the dwell, produce one fresh pulse and confirm a later manual
-   suggestion can replace the tagged notification.
+   decision does not resend the unchanged Level 1 suggestion.
 6. Confirm the notification explains aggregate evidence and offers an exact
    next-level response rather than Boost or Acknowledge.
 7. Select the suggested level from one phone. Confirm the exact level applies,
-   shared Home Assistant state updates, and stale actions no longer work.
+   shared Home Assistant state updates, and fresh evidence can send one new
+   Level 2 suggestion while stale actions no longer work.
 8. Ignore a new manual suggestion and confirm speaker volume remains unchanged.
 
 ### Validate automatic operation
@@ -326,9 +333,9 @@ against a sleeping child or an unverified speaker.
    would finish just afterward. Confirm attention waits for that pending gap
    and the episode resolves quietly.
 8. Repeat, but produce a fresh event during the grace period. Confirm the grace
-   is not extended again and the integration enters Standby, stops owned
-   playback, marks Attention required, and notifies caregivers regardless of
-   the current level or mode.
+   is not extended again and the integration keeps the current level playing,
+   marks Attention required, pauses further policy changes, and notifies
+   caregivers regardless of the current level or mode.
 
 ### Validate simulation, failures, and recovery
 
@@ -414,7 +421,7 @@ Release notes must highlight:
 - five level volumes plus Maximum;
 - the immediate first-event manual alert and automatic pulse-confirmation
   timing defaults;
-- gradual quiet downshift and the configurable bounded attention cutoff,
+- gradual quiet downshift and the configurable caregiver-attention deadline,
   defaulting to 2.5 minutes;
 - the independent Local Media selection for every active level;
 - the Sonos one-item crossfade/repeat-all optimization, queue replacement, and
@@ -434,7 +441,8 @@ Release notes must highlight:
 4. Install the published artifact through HACS in a clean Home Assistant test
    instance; do not rely only on a working-tree copy.
 5. Repeat Standby startup, exact-level selection, manual suggestion, one-step
-   automatic increase, quiet downshift, attention cutoff, and restart checks.
+   automatic increase, quiet downshift, caregiver-attention deadline, and
+   restart checks.
 6. Confirm HACS reports the expected installed version and future updates.
 7. Monitor the issue tracker and test-instance logs before promoting the
    release more broadly.

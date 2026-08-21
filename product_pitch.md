@@ -37,7 +37,7 @@ Require fresh evidence before any later increase
     ↓
 Step down gradually after quiet
     ↓
-Stop playback and request direct attention at a bounded safety deadline
+Keep playback going and request direct attention at a caregiver deadline
 ```
 
 It does not attempt to diagnose distress, replace a baby monitor, or automate
@@ -115,9 +115,10 @@ all configured caregivers one shared, tagged notification with:
 - an exact next-level suggestion;
 - camera access and a safe Standby option when attention is needed.
 
-Only the current tagged notification remains visible. After the dwell period,
-fresh qualifying evidence may replace it with a newer suggestion during the
-same episode.
+Identical advice is not redelivered to caregiver targets already reached while
+the episode, current level, suggested level, and test status remain unchanged;
+a later matching decision retries only missed targets. A changed level or later
+episode can alert again.
 
 Ignoring the suggestion changes nothing. Selecting the proposed level from a
 phone, dashboard, automation, HomeKit, or Siri calls the same guarded
@@ -147,8 +148,8 @@ interval until Baseline. The first manual alert or automatic confirmation also
 starts a 150-second caregiver deadline. If a 60-second no-event gap is already
 pending at expiry, it gets one bounded grace period to finish; fresh events do
 not extend it. A completed gap closes the episode and cancels attention.
-Otherwise Nursery Soother enters Standby, stops its own sound, and requests
-direct attention regardless of mode or level.
+Otherwise Nursery Soother keeps the selected sound playing, pauses further
+policy changes, and requests direct attention regardless of mode or level.
 
 ## What the integration coordinates
 
@@ -171,7 +172,7 @@ It provides:
 - a caregiver-attention binary sensor;
 - an artificial cry-event button for controlled testing;
 - episode-scoped, synchronized notifications;
-- gradual quiet downshift and a bounded attention cutoff;
+- gradual quiet downshift and a bounded caregiver-attention deadline;
 - speaker playback ownership checks and restart-safe recovery;
 - seamless Sonos looping through one queued item, crossfade, and repeat-all,
   with direct-playback fallback for other speakers;
@@ -257,7 +258,7 @@ The first level-based release includes:
 - immediate provisional Level 1 response from Baseline in automatic mode;
 - pulse-based automatic evidence confirmation;
 - fresh evidence and dwell before every subsequent automatic increase;
-- gradual quiet step-down and bounded attention cutoff;
+- gradual quiet step-down and a bounded caregiver-attention deadline;
 - episode-scoped notifications without Acknowledge;
 - one artificial cry-event button;
 - an optional purpose-built camera and control dashboard card;

@@ -36,7 +36,7 @@ Repeat one level at a time, never above Level 4 or Maximum volume
     ↓ no new cry event for a full quiet interval
 Move down exactly one level; repeat toward Baseline while quiet continues
     ↓ episode remains unresolved for the attention timeout
-Enter Standby, stop owned playback, and request caregiver attention
+Keep the current level playing and request caregiver attention
 ```
 
 The following rules are deliberate:
@@ -78,8 +78,10 @@ The following rules are deliberate:
 - An unresolved confirmed episode has one base attention deadline. If a
   no-event gap is already pending when it expires, that gap gets one bounded
   grace period to resolve first. Fresh events cannot extend the grace. An
-  episode that remains unresolved then enters Standby, stops only its own
-  playback, and asks a caregiver to attend.
+  episode that remains unresolved keeps its current level playing, pauses
+  further response-policy changes, and asks a caregiver to attend. Playback
+  continues, including normal owned-idle recovery, until a caregiver selects
+  another level or Standby.
 - There are no Boost, Return to baseline, or Acknowledge commands. The level
   selector expresses the parent's decision and implicitly resolves the current
   suggestion.
@@ -304,11 +306,13 @@ notifications and, when automatic operation is enabled, can affect the speaker.
 With **Automatic operation off**, the first cry event immediately sends one
 shared, tagged notification that reports the evidence and recommends the exact
 next level. It does not wait for the confirmation debounce and never changes
-speaker volume. Only the current notification is visible:
-after the dwell period, fresh qualifying evidence in the same episode may
-replace it with a newer suggestion. Choosing the proposed level from the
-notification, dashboard, automation, or Siri calls the same guarded exact-level
-command. Ignoring the suggestion does not change speaker volume.
+speaker volume. Identical advice is not redelivered to caregiver targets
+already reached while the episode, current level, suggested level, and test
+status remain unchanged, even if continuing evidence qualifies again after
+several dwell periods; a later matching decision retries only missed targets. A
+changed level or later cry episode can alert again. Choosing the proposed level
+from the notification, dashboard, automation, or Siri calls the same guarded
+exact-level command. Ignoring the suggestion does not change speaker volume.
 
 With **Automatic operation on** at Baseline, the first cry event immediately
 starts a provisional Level 1 response. If initial evidence confirms, Level 1
@@ -328,23 +332,29 @@ higher-level suggestions continue, but the policy cannot increase or quietly
 decrease the level. A parent may still select any exact level, accept a
 suggestion, or select Standby. Unlocking resumes normal policy timing; a quiet
 downshift deferred by the lock receives a fresh quiet interval. The base
-attention deadline, dependency fail-safe, and playback-ownership protections
-can still enter Standby or lower output as required.
+attention deadline can still request direct attention, while dependency
+fail-safe and playback-ownership protections can enter Standby or lower output
+as required.
 
 In both modes, each 120-second uninterrupted quiet interval moves down one
 level until Baseline. The first manual alert or automatic confirmation starts
 the configured attention deadline, which defaults to 2.5 minutes. If a
 60-second no-event gap is already pending when that deadline arrives, it gets
 one bounded chance to finish; new events cannot extend that grace. A completed
-gap closes the episode and cancels attention. Otherwise the controller enters
-Standby and requests direct caregiver attention. The native **Attention
-deadline** number changes the duration for future episodes without moving a
-deadline already in progress.
+gap closes the episode and cancels attention. Otherwise the controller keeps
+the selected level playing, pauses further policy changes, and requests direct
+caregiver attention. The native **Attention deadline** number changes the
+duration for future episodes without moving a deadline already in progress.
 
 ## Parent notifications
 
 Manual suggestions include the evidence summary, current level, and exact
 proposed level. Automatic notifications state the level change and its reason.
+Unchanged manual or Level-lock advice is deduplicated within the cry episode;
+actual automatic level changes and the final caregiver-attention request still
+notify. The stable tag replaces the visible notification, while the
+controller-side deduplication prevents identical advice from repeatedly
+alerting the phone.
 Notifications include one static camera frame, but deliberately omit the live
 camera attachment so expanding one keeps its action buttons available instead
 of opening an embedded camera player.

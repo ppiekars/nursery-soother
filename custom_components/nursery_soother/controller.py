@@ -123,6 +123,7 @@ ESCALATION_CRY_EVENT_THRESHOLD = 1
 ESCALATION_CRY_ACTIVE_SECONDS_THRESHOLD = 6.0
 
 type ControllerListener = Callable[[], None]
+type CryNotificationFingerprint = tuple[int, SoothingLevel, SoothingLevel | None, bool]
 
 _REQUIRED_MEDIA_PLAYER_FEATURES = (
     MediaPlayerEntityFeature.PLAY_MEDIA | MediaPlayerEntityFeature.VOLUME_SET
@@ -147,6 +148,15 @@ class _NativeLoopSettings:
     previous_repeat: str
     previous_crossfade: str
     group_members: tuple[str, ...]
+
+
+@dataclass(slots=True)
+class _CryNotificationDelivery:
+    """Track one cry suggestion across every configured caregiver target."""
+
+    fingerprint: CryNotificationFingerprint
+    delivered_targets: set[str]
+    retry_snapshot: EvidenceSnapshot | None
 
 
 class NurserySootherController:
@@ -199,6 +209,7 @@ class NurserySootherController:
         self._last_level_change_at: datetime | None = None
         self._session_started_at: datetime | None = None
         self._stage_simulated_events = 0
+        self._last_cry_notification: _CryNotificationDelivery | None = None
         self._evidence = CryEvidence(self.settings.evidence_window_seconds)
         self._last_error: str | None = None
         self._last_reason = "initialized"
@@ -643,7 +654,7 @@ class NurserySootherController:
         """Inject one point-in-time cry event through the normal response path."""
         async with self._lock:
             self._ensure_started()
-            if not self.enabled:
+            if not self.enabled or self.state is SootherState.ATTENTION_REQUIRED:
                 return
             self._validate_controllable()
             now = dt_util.utcnow()
@@ -1212,6 +1223,8 @@ class NurserySootherController:
         if self._baseline_previewing or not self.enabled or self._playback_interrupted:
             return
         if entity_id == self.cry_sensor:
+            if self.state is SootherState.ATTENTION_REQUIRED:
+                return
             await self._async_handle_cry_state_changed(event)
         elif entity_id == self.media_player:
             await self._async_handle_media_state_changed(event)
@@ -1337,7 +1350,10 @@ class NurserySootherController:
             self._playback_interrupted = False
             self._emit_update()
             return
-        if self.state is SootherState.ATTENTION_REQUIRED:
+        if (
+            self.state is SootherState.ATTENTION_REQUIRED
+            and self.recommendation is Recommendation.CHECK_DEVICES
+        ):
             return
         self._transition(
             SootherState.ATTENTION_REQUIRED,
@@ -2022,7 +2038,7 @@ class NurserySootherController:
         *,
         allow_quiet_gap_deferral: bool = True,
     ) -> None:
-        """Stop soothing and alert after the deadline and bounded quiet grace."""
+        """Pause response policy and alert after the deadline and quiet grace."""
         self._cancel_timer("attention")
         episode = self._episode
         confirmed_at = self._confirmed_at
@@ -2070,18 +2086,6 @@ class NurserySootherController:
                         )
                         self._emit_update()
                         return
-                stopped = await self._async_stop_playback()
-                if not stopped:
-                    self._transition(
-                        SootherState.ATTENTION_REQUIRED,
-                        Recommendation.CHECK_DEVICES,
-                        "attention timeout could not stop speaker",
-                    )
-                    await self._async_notify_dependency_problem()
-                    return
-                self._session_started_at = None
-                self.settings.level = SoothingLevel.STANDBY
-                self._persist_settings()
                 self._episode += 1
                 self._cancel_all_timers()
                 self._incident_active = False
@@ -2167,8 +2171,73 @@ class NurserySootherController:
         self, snapshot: EvidenceSnapshot, *, simulated_only: bool
     ) -> bool:
         """Explain the evidence and suggest one exact next manual level."""
-        self._action_generation += 1
         next_level = self.level.next_active()
+        fingerprint = (self._episode, self.level, next_level, simulated_only)
+        previous_delivery = self._last_cry_notification
+        if (
+            previous_delivery is not None
+            and fingerprint == previous_delivery.fingerprint
+        ):
+            pending_targets = tuple(
+                target
+                for target in self.notify_targets
+                if target not in previous_delivery.delivered_targets
+            )
+            if not pending_targets:
+                return True
+            retry_snapshot = previous_delivery.retry_snapshot
+            if retry_snapshot is None:
+                return True
+            message, actions = self._cry_notification_content(
+                retry_snapshot,
+                level=self.level,
+                next_level=next_level,
+                simulated_only=simulated_only,
+            )
+            delivered_targets = await self._async_notify_targets(
+                message,
+                actions,
+                pending_targets,
+            )
+            previous_delivery.delivered_targets.update(delivered_targets)
+            if all(
+                target in previous_delivery.delivered_targets
+                for target in self.notify_targets
+            ):
+                previous_delivery.retry_snapshot = None
+            return bool(previous_delivery.delivered_targets)
+        self._advance_notification_generation()
+        message, actions = self._cry_notification_content(
+            snapshot,
+            level=self.level,
+            next_level=next_level,
+            simulated_only=simulated_only,
+        )
+        delivered_targets = await self._async_notify_targets(
+            message, actions, self.notify_targets
+        )
+        if delivered_targets:
+            retry_snapshot = (
+                None
+                if all(target in delivered_targets for target in self.notify_targets)
+                else snapshot
+            )
+            self._last_cry_notification = _CryNotificationDelivery(
+                fingerprint=fingerprint,
+                delivered_targets=delivered_targets,
+                retry_snapshot=retry_snapshot,
+            )
+        return bool(delivered_targets)
+
+    def _cry_notification_content(
+        self,
+        snapshot: EvidenceSnapshot,
+        *,
+        level: SoothingLevel,
+        next_level: SoothingLevel | None,
+        simulated_only: bool,
+    ) -> tuple[str, list[dict[str, str]]]:
+        """Build one cry message without retaining its rendered payload."""
         prefix = "[Test] Simulated " if simulated_only else ""
         event_label = "cry event" if snapshot.events == 1 else "cry events"
         evidence = (
@@ -2185,14 +2254,14 @@ class NurserySootherController:
         else:
             message = (
                 f"{prefix}cry evidence: {evidence}. Current level is "
-                f"{self._level_title(self.level)}; consider "
+                f"{self._level_title(level)}; consider "
                 f"{self._level_title(next_level)}."
             )
             actions = [
                 self._level_action(next_level),
                 self._level_action(SoothingLevel.STANDBY),
             ]
-        return await self._async_notify(message, actions)
+        return message, actions
 
     async def _async_notify_automatic_change(
         self,
@@ -2202,7 +2271,7 @@ class NurserySootherController:
         simulated_only: bool,
     ) -> bool:
         """Report one evidence-authorized automatic level change."""
-        self._action_generation += 1
+        self._advance_notification_generation()
         prefix = "[Test] Simulated " if simulated_only else ""
         return await self._async_notify(
             (
@@ -2218,20 +2287,21 @@ class NurserySootherController:
 
     async def _async_notify_attention(self) -> None:
         """Ask a parent to attend after the finite response window."""
-        self._action_generation += 1
+        self._advance_notification_generation()
         await self._async_notify(
             (
                 "Crying continued for the full response window. Nursery Soother "
-                "is now in Standby; please check the nursery."
+                f"is continuing at {self._level_title(self.level)}; please check "
+                "the nursery."
             ),
             [
-                self._level_action(SoothingLevel.BASELINE),
+                self._level_action(SoothingLevel.STANDBY),
             ],
         )
 
     async def _async_notify_dependency_problem(self) -> None:
         """Notify parents once when a selected dependency becomes unavailable."""
-        self._action_generation += 1
+        self._advance_notification_generation()
         await self._async_notify(
             (
                 "A nursery camera, cry sensor, speaker, or parent notification "
@@ -2242,7 +2312,7 @@ class NurserySootherController:
 
     async def _async_notify_recovery(self) -> None:
         """Replace the dependency alert after recovery."""
-        self._action_generation += 1
+        self._advance_notification_generation()
         await self._async_notify(
             f"Nursery devices are available again at {self._level_title(self.level)}.",
             [],
@@ -2250,7 +2320,7 @@ class NurserySootherController:
 
     async def _async_notify_playback_replaced(self) -> None:
         """Tell parents that external speaker use paused the response loop."""
-        self._action_generation += 1
+        self._advance_notification_generation()
         await self._async_notify(
             (
                 "The nursery speaker was already active or started playing "
@@ -2289,11 +2359,22 @@ class NurserySootherController:
         actions: list[dict[str, str]],
     ) -> bool:
         """Send an action-first notification, continuing past target failures."""
+        return bool(
+            await self._async_notify_targets(message, actions, self.notify_targets)
+        )
+
+    async def _async_notify_targets(
+        self,
+        message: str,
+        actions: list[dict[str, str]],
+        targets: tuple[str, ...],
+    ) -> set[str]:
+        """Notify selected caregivers and return the targets reached."""
         if not self.configured:
-            return False
+            return set()
         camera = self.camera
         if camera is None:
-            return False
+            return set()
         notification_data: dict[str, Any] = {
             "tag": self.notification_tag,
             "group": NOTIFICATION_TAG_PREFIX,
@@ -2312,16 +2393,17 @@ class NurserySootherController:
             "data": notification_data,
         }
         results = await asyncio.gather(
-            *(
-                self._async_call_notify(target, payload)
-                for target in self.notify_targets
-            )
+            *(self._async_call_notify(target, payload) for target in targets)
         )
-        return any(results)
+        return {
+            target
+            for target, delivered in zip(targets, results, strict=True)
+            if delivered
+        }
 
     async def _async_clear_notifications(self) -> None:
         """Clear the shared incident on both parents' devices."""
-        self._action_generation += 1
+        self._advance_notification_generation()
         if not self.configured:
             return
         payload = {
@@ -3001,7 +3083,7 @@ class NurserySootherController:
         if notify:
             await self._async_notify_playback_replaced()
         else:
-            self._action_generation += 1
+            self._advance_notification_generation()
 
     async def _async_stop_playback(  # noqa: C901, PLR0911, PLR0912
         self, *, preserve_native_loop_session: bool = False
@@ -3599,7 +3681,7 @@ class NurserySootherController:
     def _new_episode(self) -> None:
         """Invalidate stale timers and phone actions."""
         self._episode += 1
-        self._action_generation += 1
+        self._advance_notification_generation()
         self._cancel_all_timers()
         self._incident_active = False
         self._episode_confirmed = False
@@ -3612,6 +3694,11 @@ class NurserySootherController:
         self._initial_level_1_applied = False
         self._stage_simulated_events = 0
         self._evidence.reset(dt_util.utcnow())
+
+    def _advance_notification_generation(self) -> None:
+        """Invalidate prior actions and discard any pending cry retry state."""
+        self._last_cry_notification = None
+        self._action_generation += 1
 
     def _cancel_all_timers(self) -> None:
         """Cancel all response timers."""

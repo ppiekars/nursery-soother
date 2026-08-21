@@ -58,8 +58,8 @@ Standby → Baseline → Level 1 → Level 2 → Level 3 → Level 4
   at Baseline.
 - No command may skip a level automatically, exceed Level 4, exceed Maximum,
   or reuse evidence from a previous automatic increase.
-- One bounded unresolved-episode deadline enters Standby and requests
-  caregiver attention regardless of mode or current level.
+- One bounded unresolved-episode deadline preserves playback at the current
+  level and requests caregiver attention regardless of mode.
 - A dependency or speaker-ownership failure fails safe and never authorizes an
   upward change.
 
@@ -258,6 +258,8 @@ Runtime evidence belongs only to the controller:
 - evidence generation consumed by the last level increase;
 - timer handles and generation counters;
 - active notification tag and accepted action IDs;
+- the last cry-suggestion fingerprint, caregiver targets already reached, and
+  aggregate evidence retained only while another target needs a retry;
 - last integration-commanded media identity, level, and volume.
 
 Setup collects required dependencies. Reconfigure replaces them, and Configure
@@ -404,9 +406,17 @@ When Automatic operation is off, the first rising edge immediately:
 5. starts the base attention deadline without waiting for the automatic
    confirmation debounce.
 
-Each qualified evidence decision creates one current tagged notification. Once
-the stage resets, fresh evidence that qualifies after the dwell period may
-replace it with a newer suggestion during the same episode.
+The first qualified decision sends the current tagged notification. Later
+evidence decisions within the same episode and with the same current level,
+suggested level, and simulation status are not redelivered to caregiver targets
+already reached. A target that failed is retried from the original aggregate
+evidence with an unchanged action generation, so another caregiver is not
+re-alerted and their existing action remains valid. Rendered notification text
+and action payloads are not retained. A changed level, a new episode, or a real
+notification after a simulated test has a different fingerprint and may send
+one new suggestion. Automatic level-change, dependency, playback, and final
+caregiver-attention notifications are never suppressed by this cry-suggestion
+deduplication.
 
 Selecting any exact level is the caregiver's decision and replaces a separate
 Acknowledge action. A stale notification cannot change a later episode. At
@@ -477,8 +487,8 @@ When no new cry evidence is present, the controller enters Settling. In both
 manual and automatic modes, each uninterrupted 120-second quiet interval moves
 down exactly one active level. A new cry event cancels the current quiet timer.
 
-Quiet downshift stops at Baseline. Only an explicit Standby selection or the
-attention safety deadline turns playback off.
+Quiet downshift stops at Baseline. Only an explicit Standby selection or a
+playback/dependency fail-safe turns playback off.
 
 ### Bounded attention deadline
 
@@ -494,19 +504,21 @@ If the base deadline arrives while the physical sensor is off and an event-gap
 timer is already pending, that existing gap receives one bounded grace period
 to finish. The attention callback is ordered just after the gap deadline. A
 fresh event during this grace restarts the event-gap timer but cannot extend
-attention again, preserving a finite safety cutoff.
+attention again, preserving a finite caregiver-attention deadline.
 
 If the episode remains active after the base deadline and any one-time quiet
 grace, the controller:
 
-1. enters Standby;
-2. stops or pauses only integration-owned playback;
+1. keeps integration-owned playback at the current selected level;
+2. pauses further cry-response and quiet-downshift policy changes;
 3. invalidates pending level actions;
 4. exposes Attention required and an Attend recommendation;
 5. notifies every available caregiver surface.
 
-The deadline applies at every level and in both modes. It prevents indefinite
-high-volume playback and makes unresolved crying a direct-care boundary.
+The deadline applies at every level and in both modes. It makes unresolved
+crying a direct-care boundary without interrupting the soothing sound. Media
+ownership monitoring and owned-idle recovery remain active while attention is
+required.
 
 ## Artificial cry event
 
@@ -543,7 +555,7 @@ state before acting. This ensures:
   apply a stale command;
 - an event consumed by one increase cannot authorize another;
 - a canceled dwell or quiet callback cannot change a manually selected level;
-- an old attention callback cannot stop a new session;
+- an old attention callback cannot interrupt a new session;
 - duplicate phone responses are idempotent;
 - callbacks from reloads or old notifications cannot affect the new
   controller.
@@ -777,8 +789,8 @@ without raw camera payloads or notification bodies.
 - Attention tests prove the default 150-second base timer begins at the first
   manual alert or automatic confirmation, is not extended by level or runtime
   configuration changes, lets one already-pending event gap resolve first,
-  cannot be extended repeatedly by fresh events, and otherwise enters Standby
-  with caregiver attention.
+  cannot be extended repeatedly by fresh events, and otherwise preserves the
+  current playback level while requesting caregiver attention.
 - Safety tests cover monotonic configuration, the runtime Maximum cap,
   Standby, dependency loss, playback takeover, failed media actions, Sonos
   one-item repeat-all setup, idle rebuilding, and conservative setting cleanup.

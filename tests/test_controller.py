@@ -703,6 +703,45 @@ async def test_sonos_idle_rebuild_failure_enters_attention_not_soothing(
     assert await controller.async_shutdown()
 
 
+async def test_sonos_idle_failure_replaces_cry_attention_with_device_attention(
+    hass: HomeAssistant,
+    started_sonos_controller: tuple[NurserySootherController, RecordedCalls],
+) -> None:
+    """A failed restart cannot claim sound continues after the cry deadline."""
+    controller, calls = started_sonos_controller
+    await controller.async_set_locked(locked=True)
+    await _set_cry(hass, "on")
+    await _advance(hass, controller.settings.attention_seconds + 1)
+
+    assert controller.state is SootherState.ATTENTION_REQUIRED
+    assert controller.recommendation is Recommendation.ATTEND
+    current_state = hass.states.get(MEDIA_PLAYER)
+    assert current_state is not None
+    hass.services.async_remove("media_player", SERVICE_REPEAT_SET)
+
+    hass.states.async_set(MEDIA_PLAYER, "idle", dict(current_state.attributes))
+    await hass.async_block_till_done()
+
+    assert controller.state is SootherState.ATTENTION_REQUIRED
+    assert controller.recommendation is Recommendation.CHECK_DEVICES
+    assert controller.diagnostics["playback_owned"] is False
+    assert "unavailable" in _incident_notifications(calls)[-1].data["message"]
+
+    @callback
+    def _restore_repeat_service(call: ServiceCall) -> None:
+        calls.media.append(call)
+        media_state = hass.states.get(MEDIA_PLAYER)
+        assert media_state is not None
+        attributes = dict(media_state.attributes)
+        attributes[ATTR_MEDIA_REPEAT] = call.data[ATTR_MEDIA_REPEAT]
+        hass.states.async_set(MEDIA_PLAYER, media_state.state, attributes)
+
+    hass.services.async_register(
+        "media_player", SERVICE_REPEAT_SET, _restore_repeat_service
+    )
+    assert await controller.async_shutdown()
+
+
 async def test_sonos_distinct_level_track_reuses_one_native_loop_session(
     hass: HomeAssistant,
     started_sonos_controller: tuple[NurserySootherController, RecordedCalls],
@@ -2189,7 +2228,7 @@ async def test_quiet_downshift_stops_at_baseline(
     hass: HomeAssistant,
     started_controller: tuple[NurserySootherController, RecordedCalls],
 ) -> None:
-    """Quiet policy never turns soothing off without an attention timeout."""
+    """Quiet policy stops at Baseline and never turns soothing off."""
     controller, calls = started_controller
     await controller.async_set_level(SoothingLevel.LEVEL_1)
     await _initial_cry_pulses(hass)
@@ -2289,31 +2328,33 @@ async def test_attention_grace_cannot_be_extended_by_fresh_events(
     await controller.async_simulate_cry_event()
     await _advance(hass, 4)
 
-    assert controller.level is SoothingLevel.STANDBY
+    assert controller.level is SoothingLevel.BASELINE
     assert controller.state is SootherState.ATTENTION_REQUIRED
     assert controller.recommendation is Recommendation.ATTEND
     assert controller.attention_required
-    assert len(_media_calls(calls, SERVICE_MEDIA_STOP)) == stop_count + 1
+    assert controller.diagnostics["playback_owned"] is True
+    assert len(_media_calls(calls, SERVICE_MEDIA_STOP)) == stop_count
 
 
-async def test_unresolved_150_second_episode_enters_standby_and_attention(
+async def test_unresolved_150_second_episode_keeps_playing_and_requests_attention(
     hass: HomeAssistant,
     started_controller: tuple[NurserySootherController, RecordedCalls],
 ) -> None:
-    """A held cry reaches the fixed safety cutoff and stops owned playback."""
+    """A held cry requests attention without stopping owned playback."""
     controller, calls = started_controller
     stop_count = len(_media_calls(calls, SERVICE_MEDIA_STOP))
+    await controller.async_set_level(SoothingLevel.LEVEL_3)
     await controller.async_set_locked(locked=True)
 
     await _set_cry(hass, "on")
     assert controller.recommendation is Recommendation.INCREASE_LEVEL
 
     await _advance(hass, 149)
-    assert controller.level is SoothingLevel.BASELINE
+    assert controller.level is SoothingLevel.LEVEL_3
 
     await _advance(hass, 2)
 
-    assert controller.level is SoothingLevel.STANDBY
+    assert controller.level is SoothingLevel.LEVEL_3
     assert controller.state is SootherState.ATTENTION_REQUIRED
     assert controller.recommendation is Recommendation.ATTEND
     assert controller.attention_required
@@ -2322,7 +2363,38 @@ async def test_unresolved_150_second_episode_enters_standby_and_attention(
     assert controller.status_attributes["explanation"] == (
         PolicyExplanation.ATTENTION_REQUIRED
     )
-    assert len(_media_calls(calls, SERVICE_MEDIA_STOP)) == stop_count + 1
+    assert controller._last_cry_notification is None  # noqa: SLF001
+    assert controller.diagnostics["playback_owned"] is True
+    assert len(_media_calls(calls, SERVICE_MEDIA_STOP)) == stop_count
+    notifications = _incident_notifications(calls)
+    assert len(notifications) == PARENT_COUNT * 2
+    assert all(
+        "continuing at Level 3" in call.data["message"]
+        for call in notifications[-PARENT_COUNT:]
+    )
+
+    await _set_cry(hass, "off")
+    await _set_cry(hass, "on")
+    await controller.async_simulate_cry_event()
+
+    assert controller.state is SootherState.ATTENTION_REQUIRED
+    assert controller.level is SoothingLevel.LEVEL_3
+    assert not any(controller.diagnostics["timers"].values())
+    assert len(_media_calls(calls, SERVICE_MEDIA_STOP)) == stop_count
+
+    play_count = len(_media_calls(calls, SERVICE_PLAY_MEDIA))
+    hass.states.async_set(
+        MEDIA_PLAYER,
+        "idle",
+        {ATTR_SUPPORTED_FEATURES: int(SPEAKER_FEATURES)},
+    )
+    await hass.async_block_till_done()
+
+    assert controller.state is SootherState.ATTENTION_REQUIRED
+    assert controller.level is SoothingLevel.LEVEL_3
+    assert controller.diagnostics["playback_owned"] is True
+    assert len(_media_calls(calls, SERVICE_PLAY_MEDIA)) == play_count + 1
+    assert len(_media_calls(calls, SERVICE_MEDIA_STOP)) == stop_count
 
 
 async def test_simulated_cry_is_one_immediate_manual_event_not_a_virtual_state(
@@ -2459,6 +2531,65 @@ async def test_level_lock_replaces_automatic_response_with_parent_suggestion(
 
     assert controller.locked is True
     assert controller.level is SoothingLevel.LEVEL_2
+
+
+async def test_level_lock_deduplicates_unchanged_cry_suggestions(
+    hass: HomeAssistant,
+    started_controller: tuple[NurserySootherController, RecordedCalls],
+) -> None:
+    """Held crying alerts once per suggested level while policy is locked."""
+    controller, calls = started_controller
+    await controller.async_set_automatic(enabled=True)
+    await controller.async_set_locked(locked=True)
+
+    await _set_cry(hass, "on")
+    await _advance(hass, 9)
+
+    notifications = _incident_notifications(calls)
+    assert len(notifications) == PARENT_COUNT
+    assert all("Level 1" in call.data["message"] for call in notifications)
+    level_1_action = _action_containing(notifications[0], "Level 1")
+
+    await _advance(hass, 65)
+
+    assert controller.level is SoothingLevel.BASELINE
+    assert len(_incident_notifications(calls)) == PARENT_COUNT
+
+    hass.bus.async_fire(EVENT_NOTIFICATION_ACTION, {"action": level_1_action})
+    await hass.async_block_till_done()
+
+    assert controller.level is SoothingLevel.LEVEL_1
+
+    await _advance(hass, 21)
+
+    notifications = _incident_notifications(calls)
+    assert len(notifications) == PARENT_COUNT * 2
+    assert all(
+        "Level 2" in call.data["message"] for call in notifications[-PARENT_COUNT:]
+    )
+
+    await _advance(hass, 45)
+
+    assert controller.level is SoothingLevel.LEVEL_1
+    assert len(_incident_notifications(calls)) == PARENT_COUNT * 2
+
+
+async def test_same_cry_suggestion_notifies_again_in_a_new_episode(
+    hass: HomeAssistant,
+    started_controller: tuple[NurserySootherController, RecordedCalls],
+) -> None:
+    """Episode closure permits the same useful suggestion to alert again."""
+    controller, calls = started_controller
+
+    await _cry_pulse(hass)
+    assert len(_incident_notifications(calls)) == PARENT_COUNT
+
+    await _advance(hass, controller.settings.cry_gap_seconds + 1)
+    await _cry_pulse(hass)
+
+    notifications = _incident_notifications(calls)
+    assert len(notifications) == PARENT_COUNT * 2
+    assert all("Level 1" in call.data["message"] for call in notifications)
 
 
 async def test_unlock_releases_unconfirmed_provisional_without_double_increase(
@@ -2672,6 +2803,51 @@ async def test_notification_failure_does_not_block_other_parent(
     notifications = _incident_notifications(calls)
     assert len(notifications) == 1
     assert notifications[0].service == "parent_two"
+
+
+async def test_unchanged_suggestion_retries_only_a_missed_parent(
+    hass: HomeAssistant,
+    started_controller: tuple[NurserySootherController, RecordedCalls],
+) -> None:
+    """A transient phone failure retries without re-alerting another phone."""
+    controller, calls = started_controller
+    parent_one_attempts = 0
+
+    @callback
+    def _flaky_notification(call: ServiceCall) -> None:
+        nonlocal parent_one_attempts
+        parent_one_attempts += 1
+        if parent_one_attempts == 1:
+            error_message = "phone temporarily offline"
+            raise HomeAssistantError(error_message)
+        calls.notifications.append(call)
+
+    hass.services.async_register("notify", "parent_one", _flaky_notification)
+    await _cry_pulse(hass)
+
+    notifications = _incident_notifications(calls)
+    assert len(notifications) == 1
+    assert notifications[0].service == "parent_two"
+    original_action = _action_containing(notifications[0], "Level 1")
+    delivery = controller._last_cry_notification  # noqa: SLF001
+    assert delivery is not None
+    assert delivery.retry_snapshot is not None
+
+    await _advance(hass, controller.settings.level_up_seconds)
+    await _cry_pulse(hass)
+
+    notifications = _incident_notifications(calls)
+    assert len(notifications) == PARENT_COUNT
+    assert {call.service for call in notifications} == {"parent_one", "parent_two"}
+    assert _action_containing(notifications[-1], "Level 1") == original_action
+    delivery = controller._last_cry_notification  # noqa: SLF001
+    assert delivery is not None
+    assert delivery.retry_snapshot is None
+
+    hass.bus.async_fire(EVENT_NOTIFICATION_ACTION, {"action": original_action})
+    await hass.async_block_till_done()
+
+    assert controller.level is SoothingLevel.LEVEL_1
 
 
 @pytest.mark.parametrize("mode", ["manual", "automatic"])
