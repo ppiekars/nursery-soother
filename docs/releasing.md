@@ -155,8 +155,7 @@ The test suite must cover:
 - config-entry setup, reload, unload, and listener/timer cleanup;
 - one-time frontend registration, static card URL, and extra-module loading;
 - card form filters, native action mapping, exact-next recommendation guards,
-  camera fallback/refresh/cancellation, signed snapshot URLs, and attention
-  semantics;
+  omitted embedded camera media, camera shortcuts, and attention semantics;
 - missing, unknown, and unavailable cry sensor, camera, speaker, and notify
   targets;
 - playback takeover, explicit same-ID user replay, and signed local-media URL
@@ -196,21 +195,19 @@ against a sleeping child or an unverified speaker.
    error and without a manually configured dashboard resource.
 2. Choose **Add card > Nursery Soother** and confirm the visual editor exposes
    `camera_entity`, `level_entity`, `baseline_entity`, `automatic_entity`, `lock_entity`,
-   `state_entity`, `recommendation_entity`, `attention_entity`, and the optional
-   `camera_view` choice (`live`, `auto`, or `image`).
+   `state_entity`, `recommendation_entity`, and `attention_entity`.
 3. Select the configured camera plus the seven entities from the Nursery Soother
-   device. Save, reopen the editor, and confirm every selection and camera mode
-   round-trips.
+   device. Save, reopen the editor, and confirm every selection round-trips.
 4. Exercise all six exact level buttons, Baseline speaker control, and the Auto
-   and Lock controls. Confirm the camera timer runs only outside Standby and
+   and Lock controls. Confirm the session timer runs only outside Standby and
    Baseline-only playback leaves the level, policy, and timer in Standby. Confirm
    they call the corresponding native select or switch action and reflect
    entity-state updates from elsewhere in Home Assistant.
 5. Produce an `increase_level` recommendation with a valid `suggested_level`.
    Confirm **Set** selects exactly that level and stale or malformed
    recommendations do not issue an action.
-6. Exercise `live`, `auto`, and `image` camera modes. Confirm the camera area
-   opens the standard camera more-info dialog.
+6. Confirm the card contains no camera image or video feed, and its camera
+   button opens the standard camera more-info dialog.
 7. Trigger Attention required and confirm the attention banner appears.
    Press **Attend** and verify it only opens the camera more-info dialog: it
    must not clear attention, change level, or perform an Acknowledge action.
@@ -290,8 +287,9 @@ against a sleeping child or an unverified speaker.
    does not create another response decision.
 5. After the dwell, produce one fresh pulse and confirm a later manual
    decision does not resend the unchanged Level 1 suggestion.
-6. Confirm the notification explains aggregate evidence and offers an exact
-   next-level response rather than Boost or Acknowledge.
+6. Confirm the notification explains aggregate evidence, offers an exact
+   next-level response rather than Boost or Acknowledge, and contains no camera
+   image or video attachment.
 7. Select the suggested level from one phone. Confirm the exact level applies,
    shared Home Assistant state updates, and fresh evidence can send one new
    Level 2 suggestion while stale actions no longer work.
@@ -401,8 +399,8 @@ Before tagging, compare the implementation with:
   ownership, Sonos native-loop ownership, attention invariants, and frontend
   registration boundary;
 - `examples/dashboard.yaml` optional custom card, all eight entity references,
-  camera mode, rename guidance, native-card fallback, seven numbers, and
-  confirmed artificial-event action;
+  rename guidance, native-card fallback, seven numbers, and confirmed
+  artificial-event action;
 - `product_pitch.md` so implemented per-level sounds and remaining deferred
   features are described accurately.
 

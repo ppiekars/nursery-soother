@@ -121,7 +121,7 @@ Before setup, make these available in Home Assistant:
 
 - Home Assistant 2026.7.0 or newer;
 - a `binary_sensor` whose on transition means a cry was detected;
-- a `camera` for parent-facing notification and dashboard context;
+- a `camera` for parent-facing notification and dashboard shortcuts;
 - a `media_player` that supports setting volume, playing the selected media,
   and stopping or pausing playback;
 - local audio selected for each active level through Home Assistant's
@@ -355,9 +355,9 @@ actual automatic level changes and the final caregiver-attention request still
 notify. The stable tag replaces the visible notification, while the
 controller-side deduplication prevents identical advice from repeatedly
 alerting the phone.
-Notifications include one static camera frame, but deliberately omit the live
-camera attachment so expanding one keeps its action buttons available instead
-of opening an embedded camera player.
+Notifications deliberately omit camera images and video attachments. This
+keeps nursery captures out of the notification payload and leaves actionable
+controls available.
 
 There is no separate Acknowledge action. A parent's exact-level selection is
 the shared decision, synchronizes state for every phone, and invalidates stale
@@ -372,9 +372,10 @@ notifications](https://companion.home-assistant.io/docs/notifications/actionable
 ## Dashboard
 
 Nursery Soother ships an optional `custom:nursery-soother-card` that combines
-the nursery camera, elapsed session time, independent Baseline playback, policy
+elapsed session time, a camera shortcut, independent Baseline playback, policy
 status, recommendation, attention state, exact level control, Automatic
-operation, and Level lock. When Home Assistant's frontend is
+operation, and Level lock. The card does not embed a camera image or video
+feed. When Home Assistant's frontend is
 available, the integration serves and loads the card module automatically from
 `/nursery_soother/nursery-soother-card.js`; do not add a separate dashboard
 resource. On Home Assistant 2026.7 or newer, choose **Add card > Nursery
@@ -393,7 +394,6 @@ Manual YAML uses these keys:
 | `state_entity` | Yes | Policy-state `sensor` |
 | `recommendation_entity` | Yes | Recommendation `sensor` |
 | `attention_entity` | Yes | Attention-required `binary_sensor` |
-| `camera_view` | No | `live` (default), `auto`, or `image` |
 
 ```yaml
 type: custom:nursery-soother-card
@@ -405,21 +405,19 @@ lock_entity: switch.nursery_soother_level_lock
 state_entity: sensor.nursery_soother_state
 recommendation_entity: sensor.nursery_soother_recommendation
 attention_entity: binary_sensor.nursery_soother_attention_required
-camera_view: live
 ```
 
 The six level buttons call `select.select_option` for Standby, Baseline, or an
 exact Level 1–4. The **Auto** and **Lock** controls call `switch.turn_on` or
 `switch.turn_off` from the current switch state, and **Set** applies the exact
 level exposed in the recommendation sensor's `suggested_level` attribute.
-The camera timer runs from the active session's start and resets in Standby.
+The session timer runs from the active session's start and resets in Standby.
 The speaker control toggles Baseline playback independently while Standby is
 selected, so it does not start a session, the response policy, or the timer.
-`live` and `auto` use Home Assistant's picture-entity camera behavior, while
-`image` refreshes the authenticated camera snapshot every 10 seconds. Tapping
-any camera view opens the standard camera more-info dialog. When attention is
-required, **Attend** opens that same camera dialog; it does not acknowledge or clear attention,
-change the level, or call a separate Acknowledge action.
+The camera button opens the standard camera more-info dialog without embedding
+the feed in the card. When attention is required, **Attend** opens that same
+camera dialog; it does not acknowledge or clear attention, change the level,
+or call a separate Acknowledge action.
 Volume and attention-deadline numbers and **Simulate cry event** remain
 available through native entity cards and the device page rather than this
 compact card.
@@ -487,7 +485,8 @@ and stop behavior on the actual speaker before relying on either path.
 
 ## Privacy and diagnostics
 
-The response policy runs inside Home Assistant. Nursery Soother does not upload
+The response policy runs inside Home Assistant. Nursery Soother does not embed
+camera media in its dashboard card, attach captures to notifications, upload
 camera media, implement its own cloud service, or contact a device vendor. The
 selected camera, media-player, and Companion app integrations retain their own
 normal connectivity and privacy characteristics.

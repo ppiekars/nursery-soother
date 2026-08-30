@@ -21,7 +21,6 @@ cards:
     state_entity: sensor.nursery_soother_state
     recommendation_entity: sensor.nursery_soother_recommendation
     attention_entity: binary_sensor.nursery_soother_attention_required
-    camera_view: live
 
   - type: entities
     title: Testing, level volumes, and hard cap

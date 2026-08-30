@@ -1766,7 +1766,8 @@ async def test_manual_first_pulse_immediately_suggests_exact_next_level(
         assert "1 cry event" in notification.data["message"]
         assert "Level 1" in notification.data["message"]
         assert ATTR_ENTITY_ID not in notification.data["data"]
-        assert notification.data["data"]["image"] == f"/api/camera_proxy/{CAMERA}"
+        assert "image" not in notification.data["data"]
+        assert "video" not in notification.data["data"]
         assert notification.data["data"]["url"] == f"entityId:{CAMERA}"
         assert notification.data["data"]["clickAction"] == f"entityId:{CAMERA}"
         titles = {action["title"] for action in notification.data["data"]["actions"]}

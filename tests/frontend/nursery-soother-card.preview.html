@@ -80,35 +80,6 @@
     </main>
 
     <script type="module">
-      const cameraSvg = `
-        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 500">
-          <defs>
-            <linearGradient id="wall" x1="0" y1="0" x2="0" y2="1">
-              <stop offset="0" stop-color="#a9c3cd"/>
-              <stop offset="1" stop-color="#647a82"/>
-            </linearGradient>
-            <linearGradient id="blanket" x1="0" y1="0" x2="1" y2="1">
-              <stop offset="0" stop-color="#e8c7a7"/>
-              <stop offset="1" stop-color="#bd8c72"/>
-            </linearGradient>
-          </defs>
-          <rect width="800" height="500" fill="url(#wall)"/>
-          <circle cx="650" cy="105" r="58" fill="#f2dfb2" opacity=".8"/>
-          <rect y="380" width="800" height="120" fill="#46575b"/>
-          <rect x="105" y="205" width="585" height="205" rx="22" fill="#493c36"/>
-          <rect x="132" y="234" width="531" height="128" rx="18" fill="url(#blanket)"/>
-          <path d="M155 322c90-78 184 44 275-26 88-66 151 11 210 44v22H155z" fill="#dcb596"/>
-          <g fill="#332b28">
-            <rect x="128" y="181" width="22" height="244" rx="9"/>
-            <rect x="645" y="181" width="22" height="244" rx="9"/>
-            <rect x="128" y="181" width="539" height="18" rx="8"/>
-          </g>
-          <circle cx="392" cy="286" r="29" fill="#b67b60"/>
-          <path d="M348 332c23-48 73-48 92 0" fill="#8b6f82"/>
-        </svg>
-      `;
-      const picture = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(cameraSvg)}`;
-
       const ids = {
         camera: "camera.nursery",
         level: "select.nursery_soother_level",
@@ -124,7 +95,7 @@
         [ids.camera]: {
           entity_id: ids.camera,
           state: "idle",
-          attributes: { friendly_name: "Nursery camera", entity_picture: picture },
+          attributes: { friendly_name: "Nursery camera" },
         },
         [ids.level]: { entity_id: ids.level, state: "level_1", attributes: {} },
         [ids.baseline]: { entity_id: ids.baseline, state: "off", attributes: {} },
@@ -201,7 +172,6 @@
         state_entity: ids.state,
         recommendation_entity: ids.recommendation,
         attention_entity: ids.attention,
-        camera_view: "image",
       });
       card.hass = hass();
       card.addEventListener("hass-more-info", (event) => {

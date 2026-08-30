@@ -2380,10 +2380,6 @@ class NurserySootherController:
             "group": NOTIFICATION_TAG_PREFIX,
             "url": f"entityId:{camera}",
             "clickAction": f"entityId:{camera}",
-            # A plain image is a single camera frame. Deliberately omit
-            # ``entity_id`` here: on iOS that enables the live camera player
-            # and can displace the actionable-notification controls.
-            "image": f"/api/camera_proxy/{camera}",
             "actions": actions,
         }
 

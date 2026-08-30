@@ -72,9 +72,7 @@ const STATE_META = Object.freeze({
   unavailable: { label: "Unavailable", color: "#9299a5" },
 });
 
-const CAMERA_VIEWS = new Set(["live", "auto", "image"]);
 const UNAVAILABLE_STATES = new Set(["unknown", "unavailable"]);
-const SNAPSHOT_REFRESH_MS = 10_000;
 
 const FORM_LABELS = Object.freeze({
   camera_entity: "Nursery camera",
@@ -85,7 +83,6 @@ const FORM_LABELS = Object.freeze({
   state_entity: "Policy state",
   recommendation_entity: "Recommendation",
   attention_entity: "Attention required",
-  camera_view: "Camera view",
 });
 
 const CARD_STYLES = `
@@ -111,133 +108,48 @@ const CARD_STYLES = `
     animation: ns-glow 1.8s ease-in-out infinite;
   }
 
-  .camera {
-    position: relative;
-    width: 100%;
-    aspect-ratio: 16 / 10;
-    overflow: hidden;
-    cursor: pointer;
+  .overview {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto auto auto;
+    align-items: center;
+    gap: 8px;
+    padding: 12px;
     background: var(--secondary-background-color, #e8eaed);
   }
 
-  .camera:focus-visible {
-    outline: 3px solid var(--primary-color, #03a9f4);
-    outline-offset: -3px;
-  }
-
-  .camera-media,
-  .camera-placeholder,
-  .camera-snapshot,
-  .native-camera {
-    position: absolute;
-    inset: 0;
-    width: 100%;
-    height: 100%;
-  }
-
-  .camera-media {
-    pointer-events: none;
-  }
-
-  .camera-placeholder {
-    display: grid;
-    place-items: center;
-    background: repeating-linear-gradient(
-      135deg,
-      var(--secondary-background-color, #dfe2e6) 0,
-      var(--secondary-background-color, #dfe2e6) 14px,
-      var(--card-background-color, #eceef0) 14px,
-      var(--card-background-color, #eceef0) 28px
-    );
-  }
-
-  .camera-placeholder[hidden],
-  .camera-snapshot[hidden],
   .banner[hidden],
   .entity-warning[hidden] {
     display: none;
   }
 
-  .placeholder-label {
-    padding: 6px 10px;
-    color: var(--secondary-text-color, rgba(0, 0, 0, 0.62));
-    background: color-mix(
-      in srgb,
-      var(--card-background-color, #ffffff) 84%,
-      transparent
-    );
-    border-radius: 999px;
-    font-size: 12px;
-    font-weight: 600;
-  }
-
-  .camera-snapshot {
-    display: block;
-    object-fit: cover;
-  }
-
-  .native-camera {
-    z-index: 1;
-    display: block;
-    overflow: hidden;
-    --ha-card-background: transparent;
-    --ha-card-border-radius: 0;
-    --ha-card-border-width: 0;
-    --ha-card-box-shadow: none;
-  }
-
-  .camera-badge,
   .state-badge {
-    position: absolute;
-    z-index: 2;
-    top: 8px;
     display: inline-flex;
     align-items: center;
     gap: 6px;
-    max-width: calc(100% - 32px);
-    color: #ffffff;
-    background: rgba(0, 0, 0, 0.58);
+    min-width: 0;
+    width: fit-content;
+    max-width: 100%;
+    padding: 7px 10px;
+    color: var(--primary-text-color, rgba(0, 0, 0, 0.87));
+    background: var(--card-background-color, #ffffff);
     border-radius: 999px;
     box-sizing: border-box;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12);
+    font-size: 12px;
+    font-weight: 650;
     line-height: 1;
     white-space: nowrap;
   }
 
-  .camera-badge {
-    left: 8px;
-    padding: 5px 8px 5px 7px;
-    font-size: 10.5px;
-    font-weight: 700;
-    letter-spacing: 0.04em;
-  }
-
-  .state-badge {
-    right: 8px;
+  .status-text {
     overflow: hidden;
-    padding: 6px 9px;
-    font-size: 11px;
-    font-weight: 650;
     text-overflow: ellipsis;
   }
 
-  .camera-dot,
   .state-dot,
   .pill-dot {
     flex: 0 0 auto;
     border-radius: 50%;
-  }
-
-  .camera-dot {
-    width: 6px;
-    height: 6px;
-    background: #ff5252;
-    animation: ns-pulse 1.6s ease-in-out infinite;
-  }
-
-  .camera-badge.is-image .camera-dot,
-  .camera-badge.is-unavailable .camera-dot {
-    animation: none;
-    background: #b0b5bf;
   }
 
   .state-dot {
@@ -250,20 +162,17 @@ const CARD_STYLES = `
     animation: ns-pulse 1.4s ease-in-out infinite;
   }
 
-  .camera-timer,
+  .session-timer,
+  .camera-button,
   .speaker-button {
-    position: absolute;
-    z-index: 3;
-    bottom: 8px;
-    color: #ffffff;
-    background: rgba(0, 0, 0, 0.62);
-    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.24);
+    color: var(--secondary-text-color, rgba(0, 0, 0, 0.62));
+    background: var(--card-background-color, #ffffff);
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12);
   }
 
-  .camera-timer {
-    left: 8px;
+  .session-timer {
     min-width: 48px;
-    padding: 6px 9px;
+    padding: 7px 9px;
     border-radius: 999px;
     box-sizing: border-box;
     font-size: 12px;
@@ -274,20 +183,24 @@ const CARD_STYLES = `
     pointer-events: none;
   }
 
-  .camera-timer.is-active {
-    background: rgba(0, 0, 0, 0.74);
+  .session-timer.is-active {
+    color: var(--primary-text-color, rgba(0, 0, 0, 0.87));
   }
 
+  .camera-button,
   .speaker-button {
-    right: 8px;
     display: grid;
     width: 34px;
     height: 34px;
     padding: 7px;
     place-items: center;
-    border: 1px solid rgba(255, 255, 255, 0.34);
+    border: 1px solid var(--divider-color, rgba(0, 0, 0, 0.12));
     border-radius: 50%;
     transition: background-color 120ms ease, transform 120ms ease;
+  }
+
+  .camera-button.is-unavailable {
+    opacity: 0.52;
   }
 
   .speaker-button.is-on {
@@ -296,10 +209,12 @@ const CARD_STYLES = `
     border-color: #68d7ad;
   }
 
+  .camera-button:not(:disabled):active,
   .speaker-button:not(:disabled):active {
     transform: translateY(1px);
   }
 
+  .camera-button svg,
   .speaker-button svg {
     width: 100%;
     height: 100%;
@@ -526,7 +441,6 @@ const CARD_STYLES = `
 
   @media (prefers-reduced-motion: reduce) {
     ha-card.attention,
-    .camera-dot,
     .state-dot.pulse,
     .level-button.pending {
       animation: none;
@@ -534,6 +448,7 @@ const CARD_STYLES = `
 
     .level-button,
     .pill,
+    .camera-button,
     .speaker-button {
       transition: none;
     }
@@ -572,11 +487,6 @@ class NurserySootherCard extends HTMLElement {
     this._hass = undefined;
     this._domReady = false;
     this._pendingAction = undefined;
-    this._cameraCard = undefined;
-    this._cameraKey = undefined;
-    this._cameraGeneration = 0;
-    this._snapshotRefreshTimer = undefined;
-    this._snapshotRefreshToken = undefined;
     this._sessionRefreshTimer = undefined;
     this._sessionStartedAt = undefined;
   }
@@ -655,34 +565,15 @@ class NurserySootherCard extends HTMLElement {
             },
           },
         },
-        {
-          name: "camera_view",
-          selector: {
-            select: {
-              mode: "dropdown",
-              options: [
-                { value: "live", label: "Live" },
-                { value: "auto", label: "Auto" },
-                { value: "image", label: "Image" },
-              ],
-            },
-          },
-        },
       ],
       computeLabel: (schema) => FORM_LABELS[schema.name],
-      computeHelper: (schema) => {
-        if (schema.name === "camera_view") {
-          return "Live and Auto use Home Assistant's camera card; Image uses the current snapshot.";
-        }
-        return undefined;
-      },
     };
   }
 
   static getStubConfig() {
     // Required entities stay intentionally blank so multiple nurseries or renamed
     // registry entries can never be silently mixed by a naming heuristic.
-    return { camera_view: "live" };
+    return {};
   }
 
   setConfig(config) {
@@ -700,20 +591,7 @@ class NurserySootherCard extends HTMLElement {
       }
     }
 
-    const cameraView = config.camera_view ?? "live";
-    if (!CAMERA_VIEWS.has(cameraView)) {
-      throw new Error("camera_view must be live, auto, or image.");
-    }
-
-    const oldCameraKey = this._config
-      ? `${this._config.camera_entity}|${this._config.camera_view}`
-      : undefined;
-    this._config = { ...config, camera_view: cameraView };
-    const newCameraKey = `${this._config.camera_entity}|${cameraView}`;
-    if (oldCameraKey !== newCameraKey) {
-      this._stopSnapshotRefresh();
-      this._resetCameraCard();
-    }
+    this._config = { ...config };
 
     this._ensureDom();
     this._update();
@@ -722,9 +600,6 @@ class NurserySootherCard extends HTMLElement {
   set hass(hass) {
     this._hass = hass;
     this._ensureDom();
-    if (this._cameraCard) {
-      this._cameraCard.hass = hass;
-    }
     this._update();
   }
 
@@ -738,8 +613,6 @@ class NurserySootherCard extends HTMLElement {
   }
 
   disconnectedCallback() {
-    this._cameraGeneration += 1;
-    this._stopSnapshotRefresh();
     this._stopSessionRefresh();
   }
 
@@ -754,7 +627,7 @@ class NurserySootherCard extends HTMLElement {
     const recommendation =
       recommendationState?.state === "increase_level" &&
       recommendationState.attributes?.suggested_level === nextLevel(currentLevel)?.value;
-    return attention || recommendation ? 7 : 6;
+    return attention || recommendation ? 4 : 3;
   }
 
   getGridOptions() {
@@ -786,32 +659,27 @@ class NurserySootherCard extends HTMLElement {
     this.shadowRoot.innerHTML = `
       <style>${CARD_STYLES}</style>
       <ha-card role="region" aria-label="Nursery Soother">
-        <div
-          class="camera"
-          data-action="open-camera"
-          role="button"
-          tabindex="0"
-          aria-label="Open nursery camera details"
-        >
-          <div class="camera-media" aria-hidden="true">
-            <div class="camera-placeholder">
-              <span class="placeholder-label">Camera preview</span>
-            </div>
-            <img class="camera-snapshot" alt="" hidden>
-          </div>
-          <div class="camera-badge">
-            <span class="camera-dot"></span>
-            <span class="camera-label">LIVE</span>
-          </div>
+        <div class="overview">
           <div class="state-badge">
             <span class="state-dot"></span>
             <span class="status-text">Unavailable</span>
           </div>
           <time
-            class="camera-timer"
+            class="session-timer"
             datetime="PT0S"
             aria-label="Soothing session timer"
           >00:00</time>
+          <button
+            class="camera-button"
+            type="button"
+            data-action="open-camera"
+            aria-label="Open nursery camera details"
+            title="Open nursery camera"
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M4 6h3l1.5-2h7L17 6h3a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2zm8 3a4 4 0 1 0 0 8 4 4 0 0 0 0-8zm0 2a2 2 0 1 1 0 4 2 2 0 0 1 0-4z"></path>
+            </svg>
+          </button>
           <button
             class="speaker-button"
             type="button"
@@ -888,40 +756,12 @@ class NurserySootherCard extends HTMLElement {
       </ha-card>
     `;
 
-    const snapshot = this.shadowRoot.querySelector?.(".camera-snapshot");
-    snapshot?.addEventListener("load", () => {
-      const placeholder = this.shadowRoot.querySelector(".camera-placeholder");
-      snapshot.hidden = false;
-      placeholder.hidden = true;
-    });
-    snapshot?.addEventListener("error", () => {
-      const placeholder = this.shadowRoot.querySelector(".camera-placeholder");
-      snapshot.hidden = true;
-      snapshot.dataset.source = "";
-      placeholder.hidden = false;
-      placeholder.querySelector(".placeholder-label").textContent =
-        "Camera preview unavailable";
-    });
-
     this.shadowRoot.addEventListener("click", (event) => {
       const actionElement = event
         .composedPath()
         .find((node) => node instanceof Element && node.dataset?.action);
       if (actionElement) {
         this._handleAction(actionElement);
-      }
-    });
-
-    this.shadowRoot.addEventListener("keydown", (event) => {
-      if (event.key !== "Enter" && event.key !== " ") {
-        return;
-      }
-      const actionElement = event
-        .composedPath()
-        .find((node) => node instanceof Element && node.dataset?.action);
-      if (actionElement?.dataset.action === "open-camera") {
-        event.preventDefault();
-        this._openCamera();
       }
     });
 
@@ -1115,7 +955,7 @@ class NurserySootherCard extends HTMLElement {
   }
 
   _renderSessionTimer(active) {
-    const timer = this.shadowRoot.querySelector(".camera-timer");
+    const timer = this.shadowRoot.querySelector(".session-timer");
     const elapsedSeconds =
       active && this._sessionStartedAt !== undefined
         ? Math.max(0, Math.floor((Date.now() - this._sessionStartedAt) / 1_000))
@@ -1142,231 +982,21 @@ class NurserySootherCard extends HTMLElement {
   }
 
   _updateCamera(cameraState) {
-    const placeholder = this.shadowRoot.querySelector(".camera-placeholder");
-    const placeholderLabel = this.shadowRoot.querySelector(
-      ".placeholder-label",
-    );
-    const snapshot = this.shadowRoot.querySelector(".camera-snapshot");
-    const badge = this.shadowRoot.querySelector(".camera-badge");
-    const cameraLabel = this.shadowRoot.querySelector(".camera-label");
-    const camera = this.shadowRoot.querySelector(".camera");
-    const statusText = this.shadowRoot.querySelector(".status-text").textContent;
+    const cameraButton = this.shadowRoot.querySelector(".camera-button");
     const cameraAvailable = isUsableState(cameraState);
-    const snapshotUrl = cameraAvailable
-      ? this._snapshotUrlForCurrentView(cameraState)
-      : undefined;
-
-    placeholderLabel.textContent = cameraAvailable
-      ? "Camera preview"
-      : "Camera unavailable";
-    if (!snapshotUrl) {
-      placeholder.hidden = false;
-      snapshot.hidden = true;
-      snapshot.dataset.source = "";
-      snapshot.removeAttribute("src");
-    } else if (snapshot.dataset.source !== snapshotUrl) {
-      placeholder.hidden = false;
-      snapshot.hidden = true;
-      snapshot.dataset.source = snapshotUrl;
-      snapshot.src = snapshotUrl;
-    } else if (snapshot.complete && snapshot.naturalWidth > 0) {
-      placeholder.hidden = true;
-      snapshot.hidden = false;
-    } else if (snapshot.complete) {
-      placeholder.hidden = false;
-      snapshot.hidden = true;
-      placeholderLabel.textContent = "Camera preview unavailable";
-    }
-    snapshot.alt = cameraState?.attributes?.friendly_name ?? "Nursery camera";
-
-    badge.classList.toggle("is-image", this._config.camera_view === "image");
-    badge.classList.toggle("is-unavailable", !cameraAvailable);
-    cameraLabel.textContent = !cameraAvailable
-      ? "OFFLINE"
-      : this._config.camera_view === "live"
-        ? "LIVE MODE"
-        : this._config.camera_view === "auto"
-          ? "AUTO"
-          : "IMAGE";
     const cameraName =
       cameraState?.attributes?.friendly_name ?? "nursery camera";
-    camera.setAttribute(
+    cameraButton.setAttribute(
       "aria-label",
       cameraState
-        ? `Open ${cameraName} details. ${cameraAvailable ? "Camera available" : "Camera offline"}. Nursery Soother: ${statusText}.`
-        : `Nursery camera not found. Nursery Soother: ${statusText}.`,
+        ? `Open ${cameraName} details. ${cameraAvailable ? "Camera available" : "Camera offline"}.`
+        : "Nursery camera not found.",
     );
-    camera.setAttribute("aria-disabled", String(!cameraState));
-    camera.tabIndex = cameraState ? 0 : -1;
-
-    if (!cameraAvailable) {
-      this._stopSnapshotRefresh();
-      this._resetCameraCard();
-      return;
-    }
-
-    if (this._config.camera_view === "image") {
-      this._scheduleSnapshotRefresh();
-      this._resetCameraCard();
-      return;
-    }
-
-    this._stopSnapshotRefresh();
-    this._ensureNativeCamera(cameraState);
-  }
-
-  _cameraSnapshotUrl(cameraState, refreshToken = cameraState.last_updated) {
-    const attributes = cameraState.attributes ?? {};
-    let url = attributes.entity_picture_local ?? attributes.entity_picture;
-    if (!url) {
-      const token = attributes.access_token;
-      const tokenQuery = token ? `?token=${encodeURIComponent(token)}` : "";
-      url = `/api/camera_proxy/${cameraState.entity_id}${tokenQuery}`;
-    }
-
-    if (typeof url !== "string") {
-      return undefined;
-    }
-
-    if (/^(?:data:|blob:)/i.test(url)) {
-      return url;
-    }
-    const isHomeAssistantProxy = url.startsWith("/api/camera_proxy/");
-    const resolvedUrl =
-      /^(?:https?:)/i.test(url) || typeof this._hass?.hassUrl !== "function"
-        ? url
-        : this._hass.hassUrl(url);
-    if (!isHomeAssistantProxy || !refreshToken) {
-      return resolvedUrl;
-    }
-    const separator = resolvedUrl.includes("?") ? "&" : "?";
-    return `${resolvedUrl}${separator}ns_ts=${encodeURIComponent(refreshToken)}`;
-  }
-
-  _snapshotUrlForCurrentView(cameraState) {
-    const refreshToken =
-      this._config?.camera_view === "image" &&
-      this._snapshotRefreshToken !== undefined
-        ? this._snapshotRefreshToken
-        : cameraState.last_updated;
-    return this._cameraSnapshotUrl(cameraState, refreshToken);
-  }
-
-  _scheduleSnapshotRefresh() {
-    if (
-      this._snapshotRefreshTimer !== undefined ||
-      !this.isConnected ||
-      this._config?.camera_view !== "image" ||
-      !isUsableState(this._state(this._config.camera_entity))
-    ) {
-      return;
-    }
-
-    this._snapshotRefreshTimer = window.setTimeout(() => {
-      this._snapshotRefreshTimer = undefined;
-      this._reloadSnapshot();
-      this._scheduleSnapshotRefresh();
-    }, SNAPSHOT_REFRESH_MS);
-  }
-
-  _stopSnapshotRefresh() {
-    this._snapshotRefreshToken = undefined;
-    if (this._snapshotRefreshTimer === undefined) {
-      return;
-    }
-    window.clearTimeout(this._snapshotRefreshTimer);
-    this._snapshotRefreshTimer = undefined;
-  }
-
-  _reloadSnapshot() {
-    const cameraState = this._state(this._config?.camera_entity);
-    if (!isUsableState(cameraState) || !this._domReady) {
-      return;
-    }
-    this._snapshotRefreshToken = Date.now();
-    const snapshotUrl = this._cameraSnapshotUrl(
-      cameraState,
-      this._snapshotRefreshToken,
-    );
-    if (!snapshotUrl) {
-      return;
-    }
-
-    const snapshot = this.shadowRoot.querySelector(".camera-snapshot");
-    const placeholder = this.shadowRoot.querySelector(".camera-placeholder");
-    placeholder.hidden = false;
-    placeholder.querySelector(".placeholder-label").textContent =
-      "Refreshing camera";
-    snapshot.hidden = true;
-    snapshot.dataset.source = snapshotUrl;
-    snapshot.removeAttribute("src");
-    snapshot.src = snapshotUrl;
-  }
-
-  async _ensureNativeCamera(cameraState) {
-    const desiredKey = `${this._config.camera_entity}|${this._config.camera_view}`;
-    if (this._cameraCard && this._cameraKey === desiredKey) {
-      this._cameraCard.hass = this._hass;
-      return;
-    }
-
-    const generation = ++this._cameraGeneration;
-    this._removeNativeCamera();
-
-    if (typeof window.loadCardHelpers !== "function") {
-      return;
-    }
-
-    try {
-      const helpers = await window.loadCardHelpers();
-      if (
-        generation !== this._cameraGeneration ||
-        !this.isConnected ||
-        !this._config ||
-        desiredKey !==
-          `${this._config.camera_entity}|${this._config.camera_view}`
-      ) {
-        return;
-      }
-
-      const nativeCard = await Promise.resolve(
-        helpers.createCardElement({
-          type: "picture-entity",
-          entity: cameraState.entity_id,
-          camera_view: this._config.camera_view,
-          fit_mode: "cover",
-          show_name: false,
-          show_state: false,
-          tap_action: { action: "none" },
-          hold_action: { action: "none" },
-          double_tap_action: { action: "none" },
-        }),
-      );
-      if (generation !== this._cameraGeneration) {
-        return;
-      }
-
-      nativeCard.classList.add("native-camera");
-      nativeCard.hass = this._hass;
-      this.shadowRoot.querySelector(".camera-media").append(nativeCard);
-      this._cameraCard = nativeCard;
-      this._cameraKey = desiredKey;
-    } catch (_error) {
-      // The authenticated camera snapshot remains visible as the stable fallback.
-    }
-  }
-
-  _removeNativeCamera() {
-    if (this._cameraCard) {
-      this._cameraCard.remove();
-      this._cameraCard = undefined;
-    }
-    this._cameraKey = undefined;
-  }
-
-  _resetCameraCard() {
-    this._cameraGeneration += 1;
-    this._removeNativeCamera();
+    cameraButton.title = cameraState
+      ? `Open ${cameraName}`
+      : "Nursery camera not found";
+    cameraButton.classList.toggle("is-unavailable", !cameraAvailable);
+    cameraButton.disabled = !cameraState;
   }
 
   _handleAction(element) {
@@ -1482,7 +1112,7 @@ if (!window.customCards.some((card) => card.type === CARD_TAG)) {
     type: CARD_TAG,
     name: "Nursery Soother",
     description:
-      "Camera, session timer, Baseline preview, exact levels, Automatic operation, and Level lock.",
+      "Session timer, camera shortcut, Baseline preview, exact levels, Automatic operation, and Level lock.",
     preview: false,
     documentationURL:
       "https://github.com/ppiekars/nursery-soother#dashboard",

@@ -158,7 +158,7 @@ registry references:
 
 | Key | Domain | Role |
 | --- | --- | --- |
-| `camera_entity` | `camera` | Camera image/stream and more-info target |
+| `camera_entity` | `camera` | More-info shortcut target |
 | `level_entity` | `select` | Exact Standby, Baseline, or Level 1–4 control |
 | `baseline_entity` | `switch` | Baseline-only playback while in Standby |
 | `automatic_entity` | `switch` | Automatic operation control |
@@ -167,24 +167,21 @@ registry references:
 | `recommendation_entity` | `sensor` | Recommendation and `suggested_level` |
 | `attention_entity` | `binary_sensor` | Direct-care attention state |
 
-All eight keys are required. Optional `camera_view` accepts `live` (the
-default), `auto`, or `image`. `getConfigForm` exposes the same schema through
+All eight keys are required. `getConfigForm` exposes the same schema through
 the visual editor on the supported Home Assistant 2026.7 baseline.
-`getStubConfig` defaults only the camera mode and deliberately leaves every
-required entity for the user to select, so multiple nurseries or renamed
-registry entries cannot be silently mixed by naming guesses. A later entity
-rename therefore requires updating the Lovelace config.
+`getStubConfig` deliberately leaves every required entity for the user to
+select, so multiple nurseries or renamed registry entries cannot be silently
+mixed by naming guesses. A later entity rename therefore requires updating the
+Lovelace config.
 
 The card reads state from those entities and invokes only standard Home
 Assistant select and switch actions. Its six level controls select exact
 options with `select.select_option`; Baseline preview, Auto, and Lock call
 `switch.turn_on` or `switch.turn_off`; and a valid recommendation can select
-its exact `suggested_level`. `live` and `auto` delegate rendering to a native
-picture-entity card and fall back to an authenticated snapshot; `image` uses
-that snapshot directly and refreshes it every 10 seconds. Camera taps open Home
-Assistant's normal camera more-info dialog. The attention banner's Attend
-action opens the same dialog and deliberately does not acknowledge or clear
-attention or change the level.
+its exact `suggested_level`. The card does not request or render camera images
+or video. Its camera shortcut opens Home Assistant's normal camera more-info
+dialog. The attention banner's Attend action opens the same dialog and
+deliberately does not acknowledge or clear attention or change the level.
 Configuration-only volume and attention-deadline numbers and the
 artificial-event button stay on native entity surfaces. Native cards remain a
 complete fallback if the optional module cannot render.
@@ -678,7 +675,8 @@ Manual-mode suggestions include sanitized evidence count, cumulative active
 time, current level, exact proposed level, and camera access. Automatic-mode
 messages identify the completed exact level change and fresh evidence that
 authorized it. Attention and dependency messages prioritize direct care,
-camera access, and Standby.
+camera access, and Standby. Notifications include a camera deep link but no
+camera image or video attachment.
 
 Each notification uses a stable per-entry tag so newer policy state replaces
 older state. An accepted exact-level action synchronizes controller state and
@@ -752,8 +750,9 @@ bypass Standby and volume validation.
 ## Privacy and diagnostics
 
 Policy evaluation remains inside Home Assistant. The controller does not save
-camera images or notification contents and does not contact device vendors.
-Selected integrations retain responsibility for their own network behavior.
+camera images, attach camera media to notifications, or contact device vendors.
+The frontend card does not request or embed camera captures. Selected
+integrations retain responsibility for their own network behavior.
 
 Diagnostics redact:
 
@@ -800,8 +799,9 @@ without raw camera payloads or notification bodies.
   Standby and every active level, one-step increase and decrease, boundary
   no-ops, Level-lock bypass, rapid callbacks, gesture-agnostic dispatch, and
   unload cleanup through generic Home Assistant trigger configurations.
-- Notification tests cover evidence summaries, exact-level action IDs,
-  cross-phone synchronization, partial delivery, and stale-action rejection.
+- Notification tests cover evidence summaries, exact-level action IDs, omitted
+  camera media, cross-phone synchronization, partial delivery, and stale-action
+  rejection.
 - Config-flow tests cover setup, reconfigure, options, single-resource
   ownership, timing bounds, volume relationships, independently optional action
   triggers, and deliberate v7 remove-and-re-add schema replacement.

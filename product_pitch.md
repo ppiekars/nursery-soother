@@ -223,7 +223,8 @@ button.nursery_soother_simulate_cry_event
 
 These entities work with native dashboards, automations, HomeKit Bridge, Apple
 Shortcuts, and Siri. The optional bundled Nursery Soother dashboard card adds a
-camera-first control surface without changing those standard entity boundaries.
+compact control surface and camera shortcut without changing those standard
+entity boundaries or embedding a camera feed.
 
 ## Deployment through HACS
 
@@ -261,7 +262,7 @@ The first level-based release includes:
 - gradual quiet step-down and a bounded caregiver-attention deadline;
 - episode-scoped notifications without Acknowledge;
 - one artificial cry-event button;
-- an optional purpose-built camera and control dashboard card;
+- an optional purpose-built control dashboard card with a camera shortcut;
 - native one-item crossfade/repeat-all looping on compatible Sonos players,
   with owned-idle recovery and generic-player fallback;
 - standard Home Assistant entities, diagnostics, and tested state transitions.
@@ -271,7 +272,8 @@ Later releases can add:
 - schedules or bedtime windows;
 - multiple detection inputs and Frigate audio events;
 - long-term response analytics and evidence tuning tools;
-- richer notification previews.
+- additional notification presentation controls that preserve the no-capture
+  privacy boundary.
 
 Backward compatibility with the earlier development-only Boost/Baseline model
 is not a product requirement. A clean removal and reintegration is preferable
