@@ -12,7 +12,7 @@ dependencies = []
 dev = [
   "pre-commit",
   "pytest-cov",
-  "pytest-homeassistant-custom-component==0.13.346",
+  "pytest-homeassistant-custom-component==0.13.360",
   "ruff",
 ]
 
